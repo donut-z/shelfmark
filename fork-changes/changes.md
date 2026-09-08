@@ -150,9 +150,13 @@ Open de crontab van de `ubuntu` gebruiker op `vm1-arm`:
 crontab -e
 ```
 
-Voeg de volgende regel toe (draait elke nacht om 04:00):
+Voeg de volgende regels toe voor nachtelijke mirror-sync én overdag cookie pre-warming (met random jitter tegen WAF/bot-detectie):
 ```cron
-0 4 * * * /usr/bin/python3 /home/ubuntu/docker/shelfmark/scripts/update_mirrors.py >> /home/ubuntu/docker/shelfmark/scripts/update_mirrors.log 2>&1
+# Nachtelijke mirror sync om 04:00 (met max 5 min jitter)
+0 4 * * * /usr/bin/python3 /home/ubuntu/docker/shelfmark-fork/scripts/update_mirrors.py --random-delay 300 >> /home/ubuntu/docker/shelfmark-fork/scripts/update_mirrors.log 2>&1
+
+# Cookie pre-warming elk uur overdag (08:00 - 23:00 met max 10 min jitter)
+0 8-23 * * * /usr/bin/python3 /home/ubuntu/docker/shelfmark-fork/scripts/update_mirrors.py --prewarm-only --random-delay 600 >> /home/ubuntu/docker/shelfmark-fork/scripts/prewarm.log 2>&1
 ```
 
 ---

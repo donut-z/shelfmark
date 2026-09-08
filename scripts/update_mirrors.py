@@ -9,6 +9,7 @@ cookies pre-warmen voor alle actieve mirrors via de Shelfmark container.
 import argparse
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -335,7 +336,13 @@ def main():
     parser.add_argument("--no-restart", action="store_true", help="Do not restart container on mirror changes")
     parser.add_argument("--no-prewarm", action="store_true", help="Skip cookie pre-warming")
     parser.add_argument("--prewarm-only", action="store_true", help="Only run cookie pre-warming without checking Open-SLUM")
+    parser.add_argument("--random-delay", type=int, default=0, help="Wait a random number of seconds between 0 and N before running (cron jitter)")
     args = parser.parse_args()
+
+    if args.random_delay > 0:
+        jitter = random.randint(0, args.random_delay)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [*] Random jitter geactiveerd: {jitter}s wachten voor start...")
+        time.sleep(jitter)
 
     if args.prewarm_only:
         prewarm_mirrors(service=args.service, container=args.container)
