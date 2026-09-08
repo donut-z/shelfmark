@@ -21,7 +21,23 @@ import urllib.error
 # Paden relatief aan project root
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-MIRRORS_JSON = os.path.join(PROJECT_ROOT, "config", "plugins", "mirrors.json")
+
+
+def get_config_dir(custom_path=None):
+    """Bepaalt het actieve config pad (productie 'config' of test '.local-test/config')."""
+    if custom_path:
+        return os.path.abspath(custom_path)
+    local_test = os.path.join(PROJECT_ROOT, ".local-test", "config")
+    prod_config = os.path.join(PROJECT_ROOT, "config")
+    if not os.path.isdir(prod_config) and os.path.isdir(local_test):
+        return local_test
+    return prod_config
+
+
+def get_mirrors_json_path(custom_config_dir=None):
+    return os.path.join(get_config_dir(custom_config_dir), "plugins", "mirrors.json")
+
+
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 
 OPEN_SLUM_URL = "https://open-slum.org/"
@@ -116,10 +132,11 @@ def check_url_live(url, timeout=8):
         return False
 
 
-def update_mirrors_json(active_aa, active_libgen, active_zlib):
+def update_mirrors_json(active_aa, active_libgen, active_zlib, config_dir=None):
     """Werkt config/plugins/mirrors.json direct bij met behoud van bestaande opties."""
-    if not os.path.exists(MIRRORS_JSON):
-        print(f"[!] {MIRRORS_JSON} niet gevonden. Wordt nieuw aangemaakt.")
+    mirrors_json_path = get_mirrors_json_path(config_dir)
+    if not os.path.exists(mirrors_json_path):
+        print(f"[!] {mirrors_json_path} niet gevonden. Wordt nieuw aangemaakt.")
         current_data = {
             "AA_BASE_URL": "auto",
             "AA_MIRROR_URLS": [],
@@ -128,9 +145,9 @@ def update_mirrors_json(active_aa, active_libgen, active_zlib):
             "WELIB_MIRROR_URLS": ["https://welib.org"]
         }
     else:
-        backup_path = f"{MIRRORS_JSON}.bak"
-        shutil.copy2(MIRRORS_JSON, backup_path)
-        with open(MIRRORS_JSON, "r", encoding="utf-8") as f:
+        backup_path = f"{mirrors_json_path}.bak"
+        shutil.copy2(mirrors_json_path, backup_path)
+        with open(mirrors_json_path, "r", encoding="utf-8") as f:
             try:
                 current_data = json.load(f)
             except json.JSONDecodeError:
@@ -156,12 +173,12 @@ def update_mirrors_json(active_aa, active_libgen, active_zlib):
         changed = True
 
     if changed:
-        os.makedirs(os.path.dirname(MIRRORS_JSON), exist_ok=True)
-        with open(MIRRORS_JSON, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(mirrors_json_path), exist_ok=True)
+        with open(mirrors_json_path, "w", encoding="utf-8") as f:
             json.dump(current_data, f, indent=2)
-        print(f"[✓] {MIRRORS_JSON} succesvol bijgewerkt.")
+        print(f"[✓] {mirrors_json_path} succesvol bijgewerkt.")
     else:
-        print("[*] Geen wijzigingen nodig in mirrors.json.")
+        print(f"[*] Geen wijzigingen nodig in {mirrors_json_path}.")
 
     return changed
 
@@ -198,7 +215,7 @@ def update_env_file(active_aa, active_libgen, active_zlib):
 def get_docker_cmd(service="shelfmark", container=None):
     """Bepaalt het juiste Docker-commando voor interactie met de container."""
     if container:
-        return ["docker", "exec", container]
+        return ["docker", "exec", "-u", "shelfmark", container]
 
     try:
         res = subprocess.run(
@@ -208,11 +225,11 @@ def get_docker_cmd(service="shelfmark", container=None):
             text=True
         )
         if res.returncode == 0 and res.stdout.strip():
-            return ["docker", "compose", "exec", "-T", service]
+            return ["docker", "compose", "exec", "-T", "-u", "shelfmark", service]
     except Exception:
         pass
 
-    return ["docker", "exec", service]
+    return ["docker", "exec", "-u", "shelfmark", service]
 
 
 def restart_container(service="shelfmark", container=None):
@@ -284,6 +301,7 @@ def main():
     parser = argparse.ArgumentParser(description="Update Shelfmark mirrors from Open-SLUM.")
     parser.add_argument("--service", default="shelfmark", help="Docker compose service name (default: shelfmark)")
     parser.add_argument("--container", default=None, help="Direct Docker container name if not using compose")
+    parser.add_argument("--config-dir", default=None, help="Path to config directory containing plugins/mirrors.json")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart container on mirror changes")
     parser.add_argument("--no-prewarm", action="store_true", help="Skip cookie pre-warming")
     parser.add_argument("--prewarm-only", action="store_true", help="Only run cookie pre-warming without checking Open-SLUM")
@@ -315,7 +333,7 @@ def main():
         print("[!] Geen werkende mirrors gevonden. Geen wijzigingen doorgevoerd.")
         return
 
-    json_changed = update_mirrors_json(verified_aa, verified_libgen, verified_zlib)
+    json_changed = update_mirrors_json(verified_aa, verified_libgen, verified_zlib, config_dir=args.config_dir)
     update_env_file(verified_aa, verified_libgen, verified_zlib)
 
     if json_changed and not args.no_restart:
