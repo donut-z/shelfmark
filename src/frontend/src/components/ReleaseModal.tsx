@@ -634,12 +634,26 @@ function ShimmerBlock({ className }: { className: string }) {
 
 // Loading skeleton for releases - matches ReleaseRow layout
 // Renders enough rows to fill the container, fading out at the bottom via a gradient mask
-function ReleaseSkeleton() {
+function ReleaseSkeleton({ showBanner = true }: { showBanner?: boolean } = {}) {
   // Render enough rows to cover tall viewports; overflow is hidden by the mask
-  const rows = 8;
+  const rows = 6;
   return (
-    <div
-      className="divide-y divide-zinc-200/60 overflow-hidden dark:divide-zinc-800/60"
+    <div className="flex flex-col">
+      {showBanner && (
+        <div className="mx-5 my-3 flex items-center gap-3 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-4 py-3 text-sm dark:border-zinc-800/80 dark:bg-zinc-900/60">
+          <div className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-zinc-500 border-t-transparent dark:border-zinc-400" />
+          <div className="flex flex-col">
+            <span className="font-medium text-zinc-700 dark:text-zinc-200">
+              Searching download sources...
+            </span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              Checking mirrors and protection challenges. Can take up to one minute.
+            </span>
+          </div>
+        </div>
+      )}
+      <div
+        className="divide-y divide-zinc-200/60 overflow-hidden dark:divide-zinc-800/60"
       style={{
         maskImage: 'linear-gradient(to bottom, black 40%, transparent 100%)',
         WebkitMaskImage: 'linear-gradient(to bottom, black 40%, transparent 100%)',
@@ -686,6 +700,7 @@ function ReleaseSkeleton() {
           </div>
         </div>
       ))}
+      </div>
     </div>
   );
 }
@@ -2344,7 +2359,7 @@ const ReleaseModalSession = ({
                         </div>
                       )}
                     {/* Expanding search - show skeleton below existing results */}
-                    {currentTabLoading && filteredReleases.length > 0 && <ReleaseSkeleton />}
+                    {currentTabLoading && filteredReleases.length > 0 && <ReleaseSkeleton showBanner={false} />}
                   </>
                 );
               })()}
