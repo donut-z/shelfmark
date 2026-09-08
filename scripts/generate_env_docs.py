@@ -202,6 +202,30 @@ def _generate_bootstrap_env_docs() -> list[str]:
             "type": "boolean",
             "default": "true",
         },
+        {
+            "name": "ZLIB_EMAIL",
+            "description": "Email address for Z-Library account authentication (enables automated login and daily download quota).",
+            "type": "string",
+            "default": "",
+        },
+        {
+            "name": "ZLIB_PASSWORD",
+            "description": "Password for Z-Library account authentication.",
+            "type": "string (secret)",
+            "default": "",
+        },
+        {
+            "name": "ZLIB_REMIX_USERID",
+            "description": "Optional pre-existing Z-Library remix_userid session cookie. Automatically captured and synced across mirrors if email and password are provided.",
+            "type": "string",
+            "default": "",
+        },
+        {
+            "name": "ZLIB_REMIX_USERKEY",
+            "description": "Optional pre-existing Z-Library remix_userkey session cookie. Automatically captured and synced across mirrors if email and password are provided.",
+            "type": "string (secret)",
+            "default": "",
+        },
     ]
 
     lines = [

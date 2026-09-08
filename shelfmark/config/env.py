@@ -25,7 +25,7 @@ def _read_advanced_config(key: str) -> object | None:
                 config = json.load(f)
                 if key in config:
                     return config[key]
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):
             pass
 
     return None
@@ -84,7 +84,7 @@ def _is_sqlite_file(path: Path) -> bool:
         with path.open("rb") as f:
             header = f.read(16)
             return header[:16] == b"SQLite format 3\x00"
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         return False
 
 

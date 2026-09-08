@@ -7,15 +7,16 @@
 
 ## ⚡ Fork Improvements
 
-Key stability fixes for Anna's Archive, LibGen, and ARM64 environments:
+Key stability fixes and features for Anna's Archive, LibGen, Z-Library, and ARM64 environments:
 
-- **Persistent Protection Cookies (`clearance_cookies.json`)**: Caches solved DDoS-Guard clearance to disk; queries run in **< 2s** via HTTP without browser overhead.
+- **Persistent Protection Cookies (`clearance_cookies.json`)**: Caches solved DDoS-Guard & DiamWall clearance to disk; queries run in **< 2s** via HTTP without browser overhead.
 - **ARM64 CDP & Display Stability**: Retries browser debug port on startup and resets stale Xvfb displays/locks to prevent cold-start crashes.
-- **DDoS-Guard 200 OK Detection**: Intercepts inline JS fingerprinting challenges returning HTTP 200 and routes them to the bypasser.
-- **Automatic Mirror Failover**: Rotates mirrors (`.gl`, `.gd`, `.pk`) automatically on HTTP 429 rate limits or network failures.
-- **Mirror Sync & Pre-Warming**: Includes [`scripts/update_mirrors.py`](scripts/update_mirrors.py) to sync active mirrors from Open-SLUM and pre-warm cookies via cron.
+- **DDoS-Guard 200 OK & DiamWall 513 Detection**: Intercepts inline JS fingerprinting challenges and DiamWall WAF checks, routing them to the bypasser.
+- **Z-Library Integration & Browser-Direct Downloads**: Automated modal login (`ZLIB_EMAIL`/`ZLIB_PASSWORD`), universal session cookie persistence (`remix_userid`/`remix_userkey`) across all mirrors, and direct browser file downloads via CDP.
+- **Automatic Mirror Failover**: Rotates mirrors automatically on HTTP 429 rate limits, HTTP 5xx, or network failures across Anna's Archive, LibGen, and Z-Library.
+- **Mirror Sync & Pre-Warming**: Includes [`scripts/update_mirrors.py`](scripts/update_mirrors.py) to sync active mirrors from Open-SLUM and pre-warm cookies nightly via cron.
 
-📄 *Full technical documentation (in Dutch): [`fork-changes/changes.md`](fork-changes/changes.md).*
+📄 *Full technical documentation (in Dutch): [`fork-changes/changes.md`](fork-changes/changes.md) and [`fork-changes/zlib-integration.md`](fork-changes/zlib-integration.md).*
 
 ---
 
@@ -155,13 +156,14 @@ Environment variables work for initial setup and Docker deployments. They serve 
 | `WIREGUARD_ALLOW_IPV6_LEAK` | Escape hatch: continue even when an IPv6 kill-switch can't be installed AND IPv6 can't be disabled. Only set if the container has no IPv6 connectivity. | `false` |
 | `WIREGUARD_ALLOW_WEBUI_OFFTUNNEL` | Opt-in off-tunnel WebUI reachability. Default (`false`) keeps the kill-switch strictly fail-closed: the only off-tunnel egress is loopback, the tunnel device and the LAN allowlist. Set `true` only if a **non-LAN** client (e.g. a public reverse proxy on another segment) must reach the WebUI; it permits app-server **replies** (`--sport FLASK_PORT`, conntrack REPLY) off-tunnel — server replies only, never client-initiated egress. LAN clients never need it (covered by `LAN_NETWORK`). | `false` |
 | `WIREGUARD_STALE_AFTER` | Seconds since the last handshake before the healthcheck bounces the tunnel. | `180` |
+| `ZLIB_EMAIL` / `ZLIB_PASSWORD` | Z-Library account credentials for automated login and daily download quota | _(optional)_ |
 
 See the full [Environment Variables Reference](docs/environment-variables.md) for all available options.
 
 Some of the additional options available in Settings:
 - **Prowlarr** - Configure indexers and download clients to download books and audiobooks
 - **Additional audiobook sources** - Configure additional sources for audiobook discovery
-- **Direct Download mirrors** - Supply your own Anna's Archive mirror URLs; Auto mode tries them in the order listed. The `annas-archive.is` domain does not currently work as a source — use `annas-archive.gl` instead (checked August 2026; mirror availability changes)
+- **Direct Download mirrors** - Configure Anna's Archive (`AA_MIRROR_URLS`), LibGen (`LIBGEN_MIRROR_URLS`), and Z-Library (`ZLIB_MIRROR_URLS`) mirror URLs. Auto mode tries mirrors in the order listed. Automated mirror discovery and nightly pre-warming is available via `scripts/update_mirrors.py`.
 - **IRC** - Add details for IRC book sources and download directly from the UI. Most networks serve audiobooks from the same channel as ebooks (on `irc.irchighway.net` that's `#ebooks`, while `#bookz` is effectively inactive), so leave the separate audiobook channel blank unless your network actually indexes one. IRC audiobooks usually arrive as ZIP/RAR archives — keep those enabled under Supported Audiobook Formats or the releases are filtered out of results
 - **Library Link** - Add a link to your Calibre-Web or Grimmory instance in the UI header
 - **File processing** - Customiseable download paths, file renaming and directory creation with template-based renaming

@@ -50,6 +50,10 @@ These environment variables are used at startup before the settings system loads
 | `OIDC_AUTO_REDIRECT` | Automatically redirect to the OIDC provider instead of showing the login page. | boolean | `false` |
 | `DOCKERMODE` | Indicates the application is running inside a Docker container. | boolean | `false` |
 | `ONBOARDING` | Show the onboarding wizard on first run. Set to false to skip (useful for ephemeral storage). | boolean | `true` |
+| `ZLIB_EMAIL` | Email address for Z-Library account authentication (enables automated login and daily download quota). | string | `` |
+| `ZLIB_PASSWORD` | Password for Z-Library account authentication. | string (secret) | `` |
+| `ZLIB_REMIX_USERID` | Optional pre-existing Z-Library remix_userid session cookie. Automatically captured and synced across mirrors if email and password are provided. | string | `` |
+| `ZLIB_REMIX_USERKEY` | Optional pre-existing Z-Library remix_userkey session cookie. Automatically captured and synced across mirrors if email and password are provided. | string (secret) | `` |
 
 <details>
 <summary>Detailed descriptions</summary>
@@ -144,6 +148,34 @@ Show the onboarding wizard on first run. Set to false to skip (useful for epheme
 
 - **Type:** boolean
 - **Default:** `true`
+
+#### `ZLIB_EMAIL`
+
+Email address for Z-Library account authentication (enables automated login and daily download quota).
+
+- **Type:** string
+- **Default:** ``
+
+#### `ZLIB_PASSWORD`
+
+Password for Z-Library account authentication.
+
+- **Type:** string (secret)
+- **Default:** ``
+
+#### `ZLIB_REMIX_USERID`
+
+Optional pre-existing Z-Library remix_userid session cookie. Automatically captured and synced across mirrors if email and password are provided.
+
+- **Type:** string
+- **Default:** ``
+
+#### `ZLIB_REMIX_USERKEY`
+
+Optional pre-existing Z-Library remix_userkey session cookie. Automatically captured and synced across mirrors if email and password are provided.
+
+- **Type:** string (secret)
+- **Default:** ``
 
 </details>
 
@@ -248,7 +280,6 @@ Seconds since the last WireGuard handshake before the healthcheck bounces the tu
 | `AUDIOBOOK_LIBRARY_URL` | Adds a separate navigation button for your audiobook library (Audiobookshelf, Plex, etc). When both URLs are set, icons are shown instead of text. | string | _none_ |
 | `SUPPORTED_FORMATS` | Book formats to include in search results. ZIP/RAR archives are extracted automatically and book files are used if found. | string (comma-separated) | `epub,mobi,azw3,fb2,djvu,cbz,cbr` |
 | `SUPPORTED_AUDIOBOOK_FORMATS` | Audiobook formats to include in search results. ZIP/RAR archives are extracted automatically and audiobook files are used if found. | string (comma-separated) | `m4b,mp3,m4a,mp4,flac,ogg,wma,aac,wav,opus,zip,rar` |
-| `BOOK_LANGUAGE` | Default language filter for searches. | string (comma-separated) | `en` |
 
 <details>
 <summary>Detailed descriptions</summary>
@@ -383,7 +414,7 @@ Choose which metadata provider to use for book searches.
 
 - **Type:** string (choice)
 - **Default:** `openlibrary`
-- **Options:** `""` (No providers enabled)
+- **Options:** `hardcover` (Hardcover), `openlibrary` (Open Library)
 
 #### `METADATA_PROVIDER_AUDIOBOOK`
 
@@ -393,7 +424,7 @@ Metadata provider for audiobook searches. Uses the book provider if not set.
 
 - **Type:** string (choice)
 - **Default:** _empty string_
-- **Options:** `""` (Use book provider), `""` (No providers enabled)
+- **Options:** `""` (Use book provider), `hardcover` (Hardcover), `openlibrary` (Open Library)
 
 #### `METADATA_PROVIDER_COMBINED`
 
@@ -403,7 +434,7 @@ Metadata provider for combined mode searches. Uses the book provider if not set.
 
 - **Type:** string (choice)
 - **Default:** _empty string_
-- **Options:** `""` (Use book provider), `""` (No providers enabled)
+- **Options:** `""` (Use book provider), `hardcover` (Hardcover), `openlibrary` (Open Library)
 
 #### `DEFAULT_RELEASE_SOURCE`
 
@@ -413,7 +444,7 @@ The release source tab to open by default in the release modal for books. Leave 
 
 - **Type:** string (choice)
 - **Default:** _empty string_
-- **Options:** `""` (Use first available source)
+- **Options:** `""` (Use first available source), `direct_download` (Direct Download)
 
 #### `DEFAULT_RELEASE_SOURCE_AUDIOBOOK`
 
@@ -750,7 +781,6 @@ Automatically open the downloads sidebar when a new download is queued.
 Automatically download completed files to your browser for the selected content types.
 
 - **Type:** string (comma-separated)
-  
 - **Default:** _empty list_
 
 #### `MAX_CONCURRENT_DOWNLOADS`
@@ -1315,9 +1345,9 @@ Apply per-indexer seed time and ratio preferences from Prowlarr when sending tor
 | Variable | Description | Type | Default |
 |----------|-------------|------|---------|
 | `NEWZNAB_ENABLED` | Enable searching for books via a Newznab-compatible indexer | boolean | `false` |
-| `NEWZNAB_INDEXERS` | Named Newznab connections. Each row accepts `name`, `url`, and `api_key`. | JSON array | `[]` |
-| `NEWZNAB_URL` | Legacy single-indexer URL, used when `NEWZNAB_INDEXERS` is empty | string | _none_ |
-| `NEWZNAB_API_KEY` | Legacy single-indexer API key | string (secret) | _none_ |
+| `NEWZNAB_INDEXERS` | Add each Newznab-compatible indexer separately. The configured name is shown beside every result from that indexer. | string | _empty list_ |
+| `NEWZNAB_URL` | Used only when the named indexer list is empty | string | _none_ |
+| `NEWZNAB_API_KEY` | Used only with the legacy Newznab URL | string (secret) | _none_ |
 | `NEWZNAB_EBOOK_CATEGORIES` | Newznab category IDs searched for ebooks. Most indexers use the standard 7000, but some use custom IDs. Leave empty to use 7000. | string (comma-separated) | `7000` |
 | `NEWZNAB_AUDIOBOOK_CATEGORIES` | Newznab category IDs searched for audiobooks. Most indexers use the standard 3030, but some use custom IDs. Leave empty to use 3030. | string (comma-separated) | `3030` |
 | `NEWZNAB_AUTO_EXPAND` | Automatically retry search without category filtering if no results are found | boolean | `false` |
@@ -1338,23 +1368,16 @@ Enable searching for books via a Newznab-compatible indexer
 
 **Named Indexers**
 
-Configure multiple named Newznab-compatible indexers. The name is shown beside each search result. For environment-based configuration, provide a JSON array:
+Add each Newznab-compatible indexer separately. The configured name is shown beside every result from that indexer.
 
-```json
-[
-  {"name":"NZBGeek","url":"https://api.nzbgeek.info","api_key":"..."},
-  {"name":"DrunkenSlug","url":"https://drunkenslug.com","api_key":"..."}
-]
-```
-
-- **Type:** JSON array
-- **Default:** `[]`
+- **Type:** string
+- **Default:** _empty list_
 
 #### `NEWZNAB_URL`
 
 **Legacy Newznab URL**
 
-Single-indexer fallback used only when `NEWZNAB_INDEXERS` is empty.
+Used only when the named indexer list is empty
 
 - **Type:** string
 - **Default:** _none_
@@ -1363,7 +1386,7 @@ Single-indexer fallback used only when `NEWZNAB_INDEXERS` is empty.
 
 **Legacy API Key**
 
-API key for the legacy Newznab URL.
+Used only with the legacy Newznab URL
 
 - **Type:** string (secret)
 - **Default:** _none_
@@ -2445,7 +2468,7 @@ Select Auto to try mirrors from your list on startup and fail over on errors. Ch
 
 - **Type:** string (choice)
 - **Default:** `auto`
-- **Options:** `auto` (Auto (Recommended))
+- **Options:** `auto` (Auto (Recommended)), `https://annas-archive.gl` (annas-archive.gl), `https://annas-archive.gd` (annas-archive.gd), `https://annas-archive.pk` (annas-archive.pk)
 
 #### `AA_MIRROR_URLS`
 
