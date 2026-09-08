@@ -61,6 +61,37 @@ SELENIUMBASE_DOWNLOADS_DIR = SELENIUMBASE_RUNTIME_ROOT / "downloaded_files"
 BROWSER_RUNTIME_ROOT = Path(tempfile.gettempdir()) / "shelfmark" / "browser"
 BROWSER_HOME_DIR = BROWSER_RUNTIME_ROOT / "home"
 BROWSER_XDG_RUNTIME_DIR = BROWSER_RUNTIME_ROOT / "runtime"
+
+
+def _patch_seleniumbase_runtime_dirs() -> None:
+    """Redirect SeleniumBase lock and scratch files into writable runtime directory."""
+    try:
+        from seleniumbase.fixtures import constants
+
+        SELENIUMBASE_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        downloads_str = str(SELENIUMBASE_DOWNLOADS_DIR)
+        constants.Files.DOWNLOADS_FOLDER = downloads_str
+        constants.PipInstall.FINDLOCK = str(SELENIUMBASE_DOWNLOADS_DIR / "pipfinding.lock")
+        constants.PipInstall.LOCKFILE = str(SELENIUMBASE_DOWNLOADS_DIR / "pipinstall.lock")
+        if hasattr(constants, "Dashboard"):
+            constants.Dashboard.LOCKFILE = str(SELENIUMBASE_DOWNLOADS_DIR / "dashboard.lock")
+            constants.Dashboard.DASH_JSON = str(SELENIUMBASE_DOWNLOADS_DIR / "dashboard.json")
+            constants.Dashboard.DASH_PIE = str(SELENIUMBASE_DOWNLOADS_DIR / "dash_pie.json")
+        for attr in (
+            "DRIVER_FIXING_LOCK",
+            "DRIVER_REPAIRED",
+            "CERT_FIXING_LOCK",
+            "DOWNLOAD_FILE_LOCK",
+            "FILE_IO_LOCK",
+            "PYAUTOGUILOCK",
+        ):
+            if hasattr(constants.Files, attr):
+                setattr(constants.Files, attr, str(SELENIUMBASE_DOWNLOADS_DIR / f"{attr.lower()}.lock"))
+    except Exception as exc:
+        logger.debug("Could not patch SeleniumBase runtime directories: %s", exc)
+
+
+_patch_seleniumbase_runtime_dirs()
 _BYPASSED_BODY_LENGTH_MIN = 100_000
 _BYPASS_EMOJI_MATCH_MIN = 3
 _LOADING_BODY_LENGTH_MAX = 50
@@ -1313,6 +1344,7 @@ class _BypassHelper:
             stdin=subprocess.PIPE,
             text=True,
             env=env_vars,
+            cwd=str(tempfile.gettempdir()),
             # Give the helper its own session: Chrome, Xvfb and ffmpeg inherit its process
             # group, which is what lets the cleanup sweep tell this helper's browsers apart
             # from a concurrent worker's (#1231) and lets us kill the whole tree below.
@@ -1673,6 +1705,7 @@ async def _create_cdp_browser(url: str) -> Any:
     """Create a fresh CDP browser instance."""
     _reset_virtual_display()
     _patch_cdp_browser_start()
+    _patch_seleniumbase_runtime_dirs()
     browser_args = _get_browser_args()
     screen_width, screen_height = get_screen_size()
     display_width = screen_width + 100
