@@ -5,6 +5,20 @@
 > [!NOTE]
 > Shelfmark is feature stable and maintained on a best-effort basis. Bug fixes, security updates, and small quality-of-life improvements are still shipped, and pull requests are reviewed — including new features. There is no roadmap for new features for now.
 
+## ⚡ Verbeteringen in deze Fork / Fork Enhancements
+
+Deze fork bevat gerichte stabiliteitsverbeteringen voor direct downloads, ARM64 Docker-omgevingen en DDoS-Guard bescherming (Anna's Archive & LibGen):
+
+- **Persistente Cookie-opslag (`clearance_cookies.json`)**: Opgeloste DDoS-Guard cookies en User-Agents blijven bewaard op schijf. Vervolgzoekopdrachten en downloads duren slechts **~1 à 2 seconden** via reguliere HTTP (zonder browser-overhead).
+- **Robuuste Headless CDP Browser & Xvfb Lifecycle (ARM64-fix)**: Remote debugging poort retry-loop toegevoegd tegen cold-start crashes op ARM64; automatische display-reset en lockfile-cleanup bij fouten.
+- **DDoS-Guard 200 OK Challenge Detectie**: Inline JavaScript- en fingerprint-challenges (`iife.min.js`, `fingerprintjs.load`) worden direct herkend en doorgestuurd naar de bypasser.
+- **Automatische Mirror Failover & Rate-Limit (429) Afhandeling**: Bij HTTP 429 cooldowns of verbindingsfouten schakelt Shelfmark naadloos door naar de volgende beschikbare mirror (`.gl`, `.gd`, `.pk`) voor zowel zoekopdrachten als downloadlinks.
+- **Automatisch Update & Pre-Warming Script**: [`scripts/update_mirrors.py`](scripts/update_mirrors.py) synchroniseert actuele werkende mirrors via Open-SLUM en kan 's nachts via cron alvast clearance-cookies ophalen.
+
+📖 *Gedetailleerde technische documentatie is te vinden in [`fork-changes/changes.md`](fork-changes/changes.md).*
+
+---
+
 Shelfmark is a self-hosted web interface for searching and requesting books and audiobooks across multiple sources. Bring your own sources, metadata providers, and download clients to build a single hub for your digital library. Supports multiple users with a built-in request system, so you can share your instance with others and let them browse and request books on their own.
 
 Works great alongside the following library tools, with support for automatic imports:

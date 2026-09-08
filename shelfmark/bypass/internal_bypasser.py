@@ -353,6 +353,49 @@ def _kill_process(pid: int, cmdline: str) -> bool:
     return True
 
 
+def _cleanup_dead_x11_locks() -> None:
+    """Remove stale X11 lock files and unix sockets whose owning process has exited."""
+    try:
+        tmp_dir = Path("/tmp")
+        for lock_file in tmp_dir.glob(".X*-lock"):
+            try:
+                content = lock_file.read_text(encoding="utf-8").strip()
+                if content.isdigit():
+                    pid = int(content)
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        lock_file.unlink(missing_ok=True)
+                        disp_num = lock_file.name[2:].split("-")[0]
+                        sock = Path(f"/tmp/.X11-unix/X{disp_num}")
+                        if sock.exists():
+                            sock.unlink(missing_ok=True)
+                    except PermissionError:
+                        pass
+            except OSError:
+                pass
+    except Exception as e:
+        logger.debug("Could not cleanup stale X11 locks: %s", e)
+
+
+def _reset_virtual_display() -> None:
+    """Ensure any active or stale virtual display is cleanly stopped and state reset."""
+    try:
+        from seleniumbase import config as sb_config
+
+        vdisplay = getattr(sb_config, "_virtual_display", None)
+        if vdisplay is not None:
+            with suppress(Exception):
+                vdisplay.stop()
+            sb_config._virtual_display = None
+        sb_config._xvfb_users = 0
+        sb_config.headless_active = False
+        os.environ.pop("DISPLAY", None)
+    except Exception as e:
+        logger.debug("Error resetting virtual display: %s", e)
+    _cleanup_dead_x11_locks()
+
+
 def _cleanup_orphan_processes() -> int:
     """Kill leftover Chrome/Xvfb/ffmpeg processes. Only runs in Docker mode.
 
@@ -396,6 +439,7 @@ def _cleanup_orphan_processes() -> int:
     else:
         logger.debug("No leftover browser processes found")
 
+    _reset_virtual_display()
     return total_killed
 
 
@@ -924,6 +968,8 @@ def _run_bypass_in_current_process(url: str, retry: int, cancel_flag: Event | No
         finally:
             if driver:
                 await _close_cdp_driver(driver)
+            else:
+                _reset_virtual_display()
 
     # Bound the wait: this holds the module-wide LOCKED for its whole duration, and neither
     # page.get() nor page.wait() has a timeout of its own. Without a deadline here a single
@@ -1215,6 +1261,9 @@ def _get_via_subprocess(url: str, retry: int, cancel_flag: Event | None = None) 
         trace = result.get("traceback")
         if trace:
             logger.debug("Internal bypasser helper traceback: %s", trace)
+        if any(keyword in error.lower() for keyword in ("browser", "cdp", "timeout", "x server", "display")):
+            logger.info("Discarding bypass helper after browser/display error: %s", error)
+            _BYPASS_HELPER._discard(wait_for_exit=False)
         msg = f"{error_type}: {error}"
         raise RuntimeError(msg)
 
@@ -1261,8 +1310,64 @@ def _get_proxy_string(url: str) -> str | None:
     return proxy_url or None
 
 
+def _patch_cdp_browser_start() -> None:
+    """Increase connection retry attempts for slow cold-starts on ARM/Docker."""
+    try:
+        from seleniumbase.undetected.cdp_driver import browser as cdp_browser
+        import mycdp as cdp
+
+        if getattr(cdp_browser.Browser, "_shelfmark_patched", False):
+            return
+
+        orig_start = cdp_browser.Browser.start
+
+        async def _patched_start(self: Any) -> None:
+            try:
+                return await orig_start(self)
+            except Exception as e:
+                if "Failed to connect to the browser" in str(e) and hasattr(self, "_http"):
+                    logger.info("Browser slow to start; continuing to wait for debug port...")
+                    for _ in range(80):
+                        await asyncio.sleep(0.25)
+                        try:
+                            self.info = cdp_browser.ContraDict(
+                                await self._http.get("version"), silent=True
+                            )
+                            if self.info:
+                                break
+                        except Exception:
+                            pass
+                    if self.info:
+                        logger.info("Browser debug port connected successfully after extra wait")
+                        await asyncio.sleep(0.03)
+                        self.connection = cdp_browser.Connection(
+                            self.info.webSocketDebuggerUrl, browser=self
+                        )
+                        await asyncio.sleep(0.03)
+                        if self.config.autodiscover_targets:
+                            self.connection.handlers[cdp.target.TargetInfoChanged] = [
+                                self._handle_target_update
+                            ]
+                            self.connection.handlers[cdp.target.TargetCreated] = [
+                                self._handle_target_update
+                            ]
+                            self.connection.handlers[cdp.target.TargetDestroyed] = [
+                                self._handle_target_update
+                            ]
+                        return
+                raise
+
+        cdp_browser.Browser.start = _patched_start
+        cdp_browser.Browser._shelfmark_patched = True
+        logger.debug("Patched cdp_driver.Browser.start for extended startup timeout")
+    except Exception as exc:
+        logger.debug("Could not patch cdp_driver.Browser.start: %s", exc)
+
+
 async def _create_cdp_browser(url: str) -> Any:
     """Create a fresh CDP browser instance."""
+    _reset_virtual_display()
+    _patch_cdp_browser_start()
     browser_args = _get_browser_args()
     screen_width, screen_height = get_screen_size()
     display_width = screen_width + 100
@@ -1295,6 +1400,7 @@ async def _create_cdp_browser(url: str) -> Any:
         )
         if env.DOCKERMODE:
             _cleanup_orphan_processes()
+        _reset_virtual_display()
         raise
     except Exception as e:
         logger.warning("Pure CDP browser startup failed: %s: %s", type(e).__name__, e)
@@ -1308,6 +1414,7 @@ async def _create_cdp_browser(url: str) -> Any:
         )
         if env.DOCKERMODE:
             _cleanup_orphan_processes()
+        _reset_virtual_display()
         msg = f"Pure CDP browser startup failed: {e}"
         raise RuntimeError(msg) from e
 
@@ -1330,6 +1437,7 @@ async def _create_cdp_browser(url: str) -> Any:
 async def _close_cdp_driver(driver: Any) -> None:
     """Close CDP connections and stop the browser."""
     if not driver:
+        _reset_virtual_display()
         return
 
     logger.debug("Quitting Chrome browser (CDP)...")
@@ -1379,6 +1487,7 @@ async def _close_cdp_driver(driver: Any) -> None:
         except (OSError, RuntimeError, TypeError, ValueError) as e:
             logger.debug("Process cleanup failed: %s", e)
 
+    _reset_virtual_display()
     logger.log_resource_usage()
 
 
@@ -1400,6 +1509,17 @@ def _start_ffmpeg_recording(display: str) -> None:
     screen_width, screen_height = get_screen_size()
     display_width = screen_width + 100
     display_height = screen_height + 150
+
+    try:
+        from seleniumbase import config as sb_config
+
+        vdisplay = getattr(sb_config, "_virtual_display", None)
+        if vdisplay and hasattr(vdisplay, "size") and vdisplay.size:
+            v_width, v_height = vdisplay.size
+            display_width = min(display_width, v_width)
+            display_height = min(display_height, v_height)
+    except Exception:
+        pass
 
     ffmpeg_cmd = [
         "ffmpeg",
@@ -1594,11 +1714,17 @@ def get_bypassed_page(
     # so the caller waits the backoff out instead of looping the solve.
     remaining = network.host_cooldown_remaining(attempt_url)
     if remaining > 0:
-        msg = (
-            f"{hostname} is rate-limited (429); skipping bypass for ~{remaining:.0f}s "
-            "until the cooldown clears."
-        )
-        raise network.RateLimitedError(msg)
+        new_base, action = sel.next_mirror_or_rotate_dns()
+        if action in ("mirror", "dns") and new_base:
+            attempt_url = sel.rewrite(url)
+            hostname = urlparse(attempt_url).hostname or ""
+            remaining = network.host_cooldown_remaining(attempt_url)
+        if remaining > 0:
+            msg = (
+                f"{hostname} is rate-limited (429); skipping bypass for ~{remaining:.0f}s "
+                "until the cooldown clears."
+            )
+            raise network.RateLimitedError(msg)
 
     cached_result = _try_with_cached_cookies(attempt_url, hostname)
     if cached_result:
@@ -1608,7 +1734,7 @@ def get_bypassed_page(
         response_html = get(attempt_url, cancel_flag=cancel_flag)
     except BypassCancelledError:
         raise
-    except _CDP_OPERATION_ERRORS + _REQUEST_OPERATION_ERRORS:
+    except (network.RateLimitedError, *_CDP_OPERATION_ERRORS, *_REQUEST_OPERATION_ERRORS):
         _check_cancellation(cancel_flag, "Bypass cancelled")
         new_base, action = sel.next_mirror_or_rotate_dns()
         if action in ("mirror", "dns") and new_base:

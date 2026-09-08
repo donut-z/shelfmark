@@ -29,6 +29,8 @@ _RAW_HTML_MARKERS = (
     "<title>checking your browser",
     "/cdn-cgi/challenge-platform",
     "/.well-known/ddos-guard/",
+    "/js/fingerprint/iife.min.js",
+    "fingerprintjs.load",
 )
 
 # An interstitial is a few KB of markup. Past that it is a real page that happens to

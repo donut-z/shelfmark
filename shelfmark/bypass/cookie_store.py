@@ -6,9 +6,12 @@ module scope, which is exactly the dependency an external-bypasser deployment is
 entitled not to have installed.
 """
 
+import json
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import suppress
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,10 +22,61 @@ logger = setup_logger(__name__)
 # Cookie storage - shared with requests library for Cloudflare bypass
 # Nested mapping of domain to cookie name to cookie metadata.
 _cf_cookies: dict[str, dict] = {}
-_cf_cookies_lock = threading.Lock()
+_cf_cookies_lock = threading.RLock()
 
 # User-Agent storage - Cloudflare ties cf_clearance to the UA that solved the challenge
 _cf_user_agents: dict[str, str] = {}
+
+
+def _cookie_file_path() -> Path:
+    from shelfmark.config import env
+
+    config_dir = Path(getattr(env, "CONFIG_DIR", "/config"))
+    return config_dir / "clearance_cookies.json"
+
+
+def _save_store_to_disk() -> None:
+    """Save clearance cookies and user agents to persistent storage."""
+    try:
+        path = _cookie_file_path()
+        with _cf_cookies_lock:
+            if not _cf_cookies:
+                return
+            data = {
+                "cookies": {domain: dict(c) for domain, c in _cf_cookies.items()},
+                "user_agents": dict(_cf_user_agents),
+            }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+        logger.debug("Saved clearance cookies to %s", path)
+    except Exception as e:
+        logger.debug("Could not save clearance cookies to disk: %s", e)
+
+
+def _load_store_from_disk() -> None:
+    """Load clearance cookies and user agents from persistent storage."""
+    try:
+        path = _cookie_file_path()
+        if not path.exists():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        cookies = data.get("cookies")
+        uas = data.get("user_agents")
+        with _cf_cookies_lock:
+            if isinstance(cookies, dict):
+                for domain, domain_cookies in cookies.items():
+                    if domain not in _cf_cookies and isinstance(domain_cookies, dict):
+                        _cf_cookies[domain] = domain_cookies
+            if isinstance(uas, dict):
+                for domain, ua in uas.items():
+                    if domain not in _cf_user_agents and isinstance(ua, str):
+                        _cf_user_agents[domain] = ua
+        logger.debug("Loaded clearance cookies from %s", path)
+    except Exception as e:
+        logger.debug("Could not load clearance cookies from disk: %s", e)
+
 
 # Protection cookie names we care about (Cloudflare and DDoS-Guard)
 CF_COOKIE_NAMES = {"cf_clearance", "__cf_bm", "cf_chl_2", "cf_chl_prog"}
@@ -188,6 +242,7 @@ def store_extracted_cookies(
             logger.debug("Stored UA for %s: %s...", base_domain, str(user_agent)[:60])
         else:
             logger.debug("No UA captured for %s", base_domain)
+    _save_store_to_disk()
 
     cookie_type = "all" if extract_all else "protection"
     logger.debug("Extracted %s %s cookies for %s", len(cookies_found), cookie_type, base_domain)
@@ -211,6 +266,8 @@ def get_cf_cookies_for_domain(domain: str) -> dict[str, str]:
     base_domain = _get_base_domain(domain)
 
     with _cf_cookies_lock:
+        if base_domain not in _cf_cookies:
+            _load_store_from_disk()
         cookies = _cf_cookies.get(base_domain, {})
         if not cookies:
             return {}
@@ -219,6 +276,7 @@ def get_cf_cookies_for_domain(domain: str) -> dict[str, str]:
         if cf_clearance and _is_cookie_expired(cf_clearance):
             logger.debug("CF cookies expired for %s", base_domain)
             _cf_cookies.pop(base_domain, None)
+            _save_store_to_disk()
             return {}
 
         # Expiry applies to every cookie, not just Cloudflare's. DDoS-Guard domains
@@ -233,6 +291,7 @@ def get_cf_cookies_for_domain(domain: str) -> dict[str, str]:
                 _cf_cookies[base_domain] = live
             else:
                 _cf_cookies.pop(base_domain, None)
+            _save_store_to_disk()
 
         return {name: c["value"] for name, c in live.items()}
 
@@ -247,7 +306,10 @@ def get_cf_user_agent_for_domain(domain: str) -> str | None:
     if not domain:
         return None
     with _cf_cookies_lock:
-        return _cf_user_agents.get(_get_base_domain(domain))
+        base_domain = _get_base_domain(domain)
+        if base_domain not in _cf_user_agents:
+            _load_store_from_disk()
+        return _cf_user_agents.get(base_domain)
 
 
 def export_store() -> tuple[dict[str, dict], dict[str, str]]:
@@ -272,15 +334,23 @@ def import_store(cookies: object, user_agents: object) -> None:
             _cf_user_agents.update(
                 {str(domain): str(agent) for domain, agent in user_agents.items()}
             )
+    _save_store_to_disk()
 
 
 def clear_cf_cookies(domain: str | None = None) -> None:
-    """Clear stored Cloudflare cookies and User-Agent. If domain is None, clear all."""
+    """Clear stored Cloudflare cookies and User-Agent. If domain is None, clear memory only."""
     with _cf_cookies_lock:
         if domain:
             base_domain = _get_base_domain(domain)
             _cf_cookies.pop(base_domain, None)
             _cf_user_agents.pop(base_domain, None)
+            _save_store_to_disk()
         else:
             _cf_cookies.clear()
             _cf_user_agents.clear()
+
+
+# Auto-load persisted clearance cookies at module import
+with suppress(Exception):
+    _load_store_from_disk()
+

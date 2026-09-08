@@ -241,3 +241,7 @@ CLAUDE.md
 .playwright-mcp/
 frontend-dist/
 node_modules/
+.local-test/
+.codebase-memory/
+cookies.txt
+docker-compose.test-*.yml

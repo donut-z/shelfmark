@@ -431,8 +431,21 @@ def html_get_page(
             )
         except network.RateLimitedError as e:
             # Not a bypasser malfunction: the host is throttling this IP and a solve
-            # cannot help. Surface the wait as a plain failure so the search ends cleanly
-            # instead of looping another minutes-long solve against a 429.
+            # cannot help. If mirror rotation is available, try the next mirror!
+            if selector and network.is_aa_auto_mode():
+                new_base, action = selector.next_mirror_or_rotate_dns()
+                if action in ("mirror", "dns") and new_base:
+                    new_url = selector.rewrite(bypass_url)
+                    logger.info("Mirror %s is rate-limited; failing over to %s", bypass_url, new_url)
+                    return html_get_page(
+                        new_url,
+                        selector=selector,
+                        cancel_flag=cancel_flag,
+                        status_callback=status_callback,
+                        allow_bypasser_fallback=allow_bypasser_fallback,
+                        include_response_url=include_response_url,
+                        session=session,
+                    )
             logger.info("Skipping bypass (rate-limited): %s", e)
             if status_callback:
                 try:
@@ -705,6 +718,21 @@ def html_get_page(
                     continue
 
                 response.raise_for_status()
+
+                marker = _response_challenge_marker(response)
+                if marker and _bypass_handoff_allowed():
+                    if cookies:
+                        logger.debug(
+                            "Challenge with cookies presented; purging: %s", current_url
+                        )
+                        _purge_clearance(current_url)
+                    logger.info(
+                        "Challenge detected in 200 OK (%s); switching to bypasser: %s",
+                        marker,
+                        current_url,
+                    )
+                    return _run_bypasser(current_url)
+
                 if success_delay > 0:
                     time.sleep(success_delay)
                 return _result(response.text, response.url)

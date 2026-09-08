@@ -721,6 +721,11 @@ def _fetch_search_table_uncached(
         # Checked on the body, not on `response`: with include_response_url the give-up
         # shape is the tuple ("", url), and a tuple is truthy.
         if not html:
+            new_base, action = selector.next_mirror_or_rotate_dns()
+            if action in ("mirror", "dns") and new_base:
+                attempt_url = selector.rewrite(url)
+                logger.info("Search failed on mirror; rotating to %s", attempt_url)
+                continue
             # Network/mirror exhaustion path bubbles up so API can notify clients.
             # html_get_page records the concrete give-up reason on the selector; fall
             # back to the generic line only if nothing was recorded.
@@ -894,20 +899,23 @@ def get_book_info(book_id: str, *, fetch_download_count: bool = True) -> BrowseR
         BrowseRecord: Detailed book information including download URLs
 
     """
-    url = f"{network.get_aa_base_url()}/md5/{book_id}"
     selector = network.AAMirrorSelector()
-    # Same challenge as search: the detail page is gated on every mirror, so bypass it.
-    html = downloader.html_get_page(url, selector=selector, allow_bypasser_fallback=True)
+    for _ in range(len(network.get_available_aa_urls()) or 1):
+        url = f"{network.get_aa_base_url()}/md5/{book_id}"
+        # Same challenge as search: the detail page is gated on every mirror, so bypass it.
+        html = downloader.html_get_page(url, selector=selector, allow_bypasser_fallback=True)
+        if html:
+            soup = BeautifulSoup(_html_response_text(html), "html.parser")
+            return _parse_book_info_page(soup, book_id, fetch_download_count=fetch_download_count)
 
-    if not html:
-        detail = getattr(selector, "last_failure", None) or (
-            "Network restricted or mirrors are blocked."
-        )
-        raise SearchUnavailableError(f"Unable to reach download source. {detail}")
+        new_base, action = selector.next_mirror_or_rotate_dns()
+        if not (action in ("mirror", "dns") and new_base):
+            break
 
-    soup = BeautifulSoup(_html_response_text(html), "html.parser")
-
-    return _parse_book_info_page(soup, book_id, fetch_download_count=fetch_download_count)
+    detail = getattr(selector, "last_failure", None) or (
+        "Network restricted or mirrors are blocked."
+    )
+    raise SearchUnavailableError(f"Unable to reach download source. {detail}")
 
 
 def _parse_search_result_row(row: Tag) -> BrowseRecord | None:
