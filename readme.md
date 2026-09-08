@@ -5,17 +5,17 @@
 > [!NOTE]
 > Shelfmark is feature stable and maintained on a best-effort basis. Bug fixes, security updates, and small quality-of-life improvements are still shipped, and pull requests are reviewed — including new features. There is no roadmap for new features for now.
 
-## ⚡ Verbeteringen in deze Fork / Fork Enhancements
+## ⚡ Fork Improvements
 
-Deze fork bevat gerichte stabiliteitsverbeteringen voor direct downloads, ARM64 Docker-omgevingen en DDoS-Guard bescherming (Anna's Archive & LibGen):
+Key stability fixes for Anna's Archive, LibGen, and ARM64 environments:
 
-- **Persistente Cookie-opslag (`clearance_cookies.json`)**: Opgeloste DDoS-Guard cookies en User-Agents blijven bewaard op schijf. Vervolgzoekopdrachten en downloads duren slechts **~1 à 2 seconden** via reguliere HTTP (zonder browser-overhead).
-- **Robuuste Headless CDP Browser & Xvfb Lifecycle (ARM64-fix)**: Remote debugging poort retry-loop toegevoegd tegen cold-start crashes op ARM64; automatische display-reset en lockfile-cleanup bij fouten.
-- **DDoS-Guard 200 OK Challenge Detectie**: Inline JavaScript- en fingerprint-challenges (`iife.min.js`, `fingerprintjs.load`) worden direct herkend en doorgestuurd naar de bypasser.
-- **Automatische Mirror Failover & Rate-Limit (429) Afhandeling**: Bij HTTP 429 cooldowns of verbindingsfouten schakelt Shelfmark naadloos door naar de volgende beschikbare mirror (`.gl`, `.gd`, `.pk`) voor zowel zoekopdrachten als downloadlinks.
-- **Automatisch Update & Pre-Warming Script**: [`scripts/update_mirrors.py`](scripts/update_mirrors.py) synchroniseert actuele werkende mirrors via Open-SLUM en kan 's nachts via cron alvast clearance-cookies ophalen.
+- **Persistent Protection Cookies (`clearance_cookies.json`)**: Caches solved DDoS-Guard clearance to disk; queries run in **< 2s** via HTTP without browser overhead.
+- **ARM64 CDP & Display Stability**: Retries browser debug port on startup and resets stale Xvfb displays/locks to prevent cold-start crashes.
+- **DDoS-Guard 200 OK Detection**: Intercepts inline JS fingerprinting challenges returning HTTP 200 and routes them to the bypasser.
+- **Automatic Mirror Failover**: Rotates mirrors (`.gl`, `.gd`, `.pk`) automatically on HTTP 429 rate limits or network failures.
+- **Mirror Sync & Pre-Warming**: Includes [`scripts/update_mirrors.py`](scripts/update_mirrors.py) to sync active mirrors from Open-SLUM and pre-warm cookies via cron.
 
-📖 *Gedetailleerde technische documentatie is te vinden in [`fork-changes/changes.md`](fork-changes/changes.md).*
+📄 *Full technical documentation (in Dutch): [`fork-changes/changes.md`](fork-changes/changes.md).*
 
 ---
 
