@@ -212,10 +212,28 @@ def update_env_file(active_aa, active_libgen, active_zlib):
     print(f"[✓] {ENV_FILE} bijgewerkt.")
 
 
+def get_container_user(target):
+    """Bepaalt de UID:GID van de eigenaar van /config (bijv. 1001:1001 of 1000:1000)."""
+    try:
+        res = subprocess.run(
+            ["docker", "exec", target, "stat", "-c", "%u:%g", "/config"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return "shelfmark"
+
+
 def get_docker_cmd(service="shelfmark", container=None):
     """Bepaalt het juiste Docker-commando voor interactie met de container."""
+    target = container or service
+    user = get_container_user(target)
     if container:
-        return ["docker", "exec", "-u", "shelfmark", container]
+        return ["docker", "exec", "-u", user, container]
 
     try:
         res = subprocess.run(
@@ -225,11 +243,12 @@ def get_docker_cmd(service="shelfmark", container=None):
             text=True
         )
         if res.returncode == 0 and res.stdout.strip():
-            return ["docker", "compose", "exec", "-T", "-u", "shelfmark", service]
+            return ["docker", "compose", "exec", "-T", "-u", user, service]
     except Exception:
         pass
 
-    return ["docker", "exec", "-u", "shelfmark", service]
+    return ["docker", "exec", "-u", user, service]
+
 
 
 def restart_container(service="shelfmark", container=None):
