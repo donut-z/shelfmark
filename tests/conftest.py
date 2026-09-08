@@ -17,6 +17,10 @@ os.environ["CONFIG_DIR"] = os.path.join(_temp_base, "config")
 os.environ["INGEST_DIR"] = os.path.join(_temp_base, "ingest")
 os.environ["TMP_DIR"] = os.path.join(_temp_base, "tmp")
 
+# Clear any external mirror configuration so tests run in a pristine default state
+for _mirror_var in ("AA_MIRROR_URLS", "LIBGEN_MIRROR_URLS", "ZLIB_MIRROR_URLS", "AA_BASE_URL"):
+    os.environ.pop(_mirror_var, None)
+
 # Create the directories that will be used
 os.makedirs(os.path.join(_temp_base, "shelfmark"), exist_ok=True)  # LOG_DIR
 os.makedirs(os.path.join(_temp_base, "config"), exist_ok=True)
@@ -37,6 +41,29 @@ def _clear_torrent_fetch_cache():
     clear_torrent_fetch_cache()
     yield
     clear_torrent_fetch_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_network_state():
+    """Keep network state (AA mirror selection, DNS) from leaking between tests."""
+    import shelfmark.download.network as network
+
+    def _reset():
+        if hasattr(network, "_aa_urls") and network._aa_urls:
+            network._aa_base_url = network._aa_urls[0]
+            network._current_aa_url_index = 0
+        elif hasattr(network, "_aa_base_url"):
+            network._aa_base_url = ""
+            network._current_aa_url_index = 0
+        if hasattr(network, "state"):
+            network.state.clear()
+        if hasattr(network, "_dead_aa_urls"):
+            with network._dead_aa_urls_lock:
+                network._dead_aa_urls.clear()
+
+    _reset()
+    yield
+    _reset()
 
 
 @pytest.fixture

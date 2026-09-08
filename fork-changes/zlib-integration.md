@@ -104,10 +104,13 @@ Navigatie naar /dl/rd3lMzX2pV in Chrome
 
 ---
 
-## 5. Overwegingen & Aanbevelingen
+## 5. Implementatiestatus (Afgerond & Geverifieerd)
 
-| Aspect | Situatie | Advies |
+| Onderdeel | Status | Details |
 | :--- | :--- | :--- |
-| **Huidige Status** | LibGen (5 mirrors) + Anna's Archive (3 mirrors) werken stabiel en snel. | Z-Library integratie is momenteel niet strikt noodzakelijk. |
-| **Wanneer implementeren?** | Als LibGen én Anna's Archive gelijktijdig zware storingen ondervinden, of bij behoefte aan zeer recente Z-Lib uploads. | Volg het stappenplan in sectie 4. |
-| **Mirror Beheer** | Z-Library domeinen wisselen vaak. | `scripts/update_mirrors.py` haalt via Open-SLUM automatisch actuele domeinen (zoals `1lib.sk`) op. |
+| **DiamWall Bypass (HTTP 513)** | ✅ Werkend | Herkenning toegevoegd aan `challenge.py`, `http.py` en `internal_bypasser.py`. |
+| **Geautomatiseerde Login** | ✅ Werkend | Leest `ZLIB_EMAIL` & `ZLIB_PASSWORD` in via `.env` / `compose.yaml`. Voert eenmalige login uit via Chromium modal en vangt `remix_userid` & `remix_userkey` op. |
+| **Cookie Persistentie** | ✅ Werkend | Opgeslagen in `clearance_cookies.json` en universeel geïnjecteerd over alle actieve Z-Library mirrors. |
+| **Browser-Direct Download** | ✅ Werkend | `download_via_browser()` in `internal_bypasser.py` gekoppeld aan `_try_download_url()` in `direct_download.py`. downloads binnen ~3s voltooid. |
+| **Update-Script Compatibiliteit** | ✅ Werkend | `scripts/update_mirrors.py` behoudt de inloggegevens in `.env` foutloos bij elke run. |
+

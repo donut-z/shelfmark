@@ -21,16 +21,26 @@ DDOS_GUARD_INDICATORS = [
     "could not verify your browser automatically",
 ]
 
+DIAMWALL_INDICATORS = [
+    "diamwall",
+    "verifying your browser",
+    "access denied | diamwall",
+]
+
 # Markers that exist only in raw markup: the bypassers scan rendered innerText, where
 # a script src or a <title> never appears. The title match is scoped to the tag on
 # purpose - hosts word the rest of that sentence differently, and matching "checking
 # your browser" as free text would trip on any page that merely discusses a challenge.
 _RAW_HTML_MARKERS = (
     "<title>checking your browser",
+    "<title>verifying your browser",
+    "<title>access denied | diamwall",
+    "/.well-known/diamwall/",
     "/cdn-cgi/challenge-platform",
     "/.well-known/ddos-guard/",
     "/js/fingerprint/iife.min.js",
     "fingerprintjs.load",
+    "diamwall",
 )
 
 # An interstitial is a few KB of markup. Past that it is a real page that happens to
@@ -48,7 +58,7 @@ def challenge_marker(html: str) -> str | None:
     if not html or len(html) > MAX_CHALLENGE_HTML_CHARS:
         return None
     lowered = html.lower()
-    for marker in (*_RAW_HTML_MARKERS, *DDOS_GUARD_INDICATORS, *CLOUDFLARE_INDICATORS):
+    for marker in (*_RAW_HTML_MARKERS, *DDOS_GUARD_INDICATORS, *CLOUDFLARE_INDICATORS, *DIAMWALL_INDICATORS):
         if marker in lowered:
             return marker
     return None

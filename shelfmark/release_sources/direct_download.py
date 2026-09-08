@@ -3,6 +3,7 @@
 import itertools
 import json
 import re
+import shutil
 import threading
 import time
 import unicodedata
@@ -1379,6 +1380,31 @@ def _try_download_url(
 
         if status_callback:
             status_callback("resolving", f"Trying {source_context}")
+
+        if source_id == "zlib" or _is_configured_zlib_link(url):
+            from shelfmark.bypass.internal_bypasser import download_via_browser
+
+            downloaded_file = download_via_browser(
+                url,
+                destination_dir=book_path.parent,
+                cancel_flag=cancel_flag,
+                status_callback=status_callback,
+            )
+            if not downloaded_file or not downloaded_file.exists():
+                _raise_runtime_error(f"Z-Library browser download failed for {url}")
+
+            file_size = downloaded_file.stat().st_size
+            if file_size < _MIN_VALID_FILE_SIZE:
+                logger.warning(
+                    "Downloaded file too small (%s bytes), likely an error page", file_size
+                )
+                _raise_runtime_error(f"File too small ({file_size} bytes)")
+
+            logger.debug("Download finished (%s bytes). Moving to %s", file_size, book_path)
+            if book_path.exists():
+                book_path.unlink()
+            shutil.move(str(downloaded_file), str(book_path))
+            return url
 
         download_url = _get_download_url(
             url, book_info.title, cancel_flag, status_callback, selector, source_context

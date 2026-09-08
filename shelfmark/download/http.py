@@ -41,6 +41,7 @@ _HTTP_STATUS_FORBIDDEN = HTTPStatus.FORBIDDEN
 _HTTP_STATUS_NOT_FOUND = HTTPStatus.NOT_FOUND
 _HTTP_STATUS_RATE_LIMITED = HTTPStatus.TOO_MANY_REQUESTS
 _HTTP_STATUS_SERVICE_UNAVAILABLE = HTTPStatus.SERVICE_UNAVAILABLE
+_HTTP_STATUS_DIAMWALL = 513
 _HTTP_STATUS_OK = HTTPStatus.OK
 _HTTP_STATUS_RANGE_NOT_SATISFIABLE = HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE
 _HTTP_STATUS_PARTIAL_CONTENT = HTTPStatus.PARTIAL_CONTENT
@@ -185,7 +186,7 @@ REQUEST_TIMEOUT = (5, 10)  # (connect, read)
 MAX_DOWNLOAD_RETRIES = 2
 MAX_RESUME_ATTEMPTS = 3
 
-RETRYABLE_CODES = (429, 500, 502, 503, 504)
+RETRYABLE_CODES = (429, 500, 502, 503, 504, _HTTP_STATUS_DIAMWALL)
 CONNECTION_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
@@ -248,12 +249,17 @@ def _response_challenge_marker(response: requests.Response) -> str | None:
     decoded just to be scanned; a missing header is scanned anyway, since an
     interstitial served without one is still an interstitial.
     """
-    content_type = response.headers.get("Content-Type", "")
-    if content_type and "html" not in content_type.lower():
+    headers = getattr(response, "headers", None)
+    if headers:
+        content_type = headers.get("Content-Type", "")
+        if content_type and "html" not in content_type.lower():
+            return None
+    text = getattr(response, "text", None)
+    if not text:
         return None
     try:
-        return challenge_marker(response.text)
-    except UnicodeDecodeError, ValueError:
+        return challenge_marker(text)
+    except (UnicodeDecodeError, ValueError):
         return None
 
 
@@ -605,25 +611,29 @@ def html_get_page(
                 # the same wall: the bypasser is only ever reached from the 403 branch
                 # and the AA redirect rescues. Gate on the body, not the status, so a
                 # genuine overloaded-origin 503 keeps its retry path.
-                if response.status_code == _HTTP_STATUS_SERVICE_UNAVAILABLE:
+                if response.status_code in (_HTTP_STATUS_SERVICE_UNAVAILABLE, _HTTP_STATUS_DIAMWALL):
                     marker = _response_challenge_marker(response)
                     if marker and _bypass_handoff_allowed():
                         if cookies:
                             # Challenged while presenting clearance means those cookies
                             # are dead; same reasoning as the 403 branch below.
                             logger.debug(
-                                "503 challenge with cookies presented; purging: %s", current_url
+                                "%s challenge with cookies presented; purging: %s",
+                                response.status_code,
+                                current_url,
                             )
                             _purge_clearance(current_url)
                         logger.info(
-                            "503 challenge detected (%s); switching to bypasser: %s",
+                            "%s challenge detected (%s); switching to bypasser: %s",
+                            response.status_code,
                             marker,
                             current_url,
                         )
                         return _run_bypasser(current_url)
                     if marker:
                         logger.debug(
-                            "503 challenge (%s) but no bypasser handoff available: %s",
+                            "%s challenge (%s) but no bypasser handoff available: %s",
+                            response.status_code,
                             marker,
                             current_url,
                         )
@@ -756,8 +766,8 @@ def html_get_page(
                 logger.info("Redirect loop detected; switching to bypasser: %s", current_url)
                 return _redirect_loop_handoff(current_url)
 
-            # 403 = Cloudflare/DDoS-Guard protection
-            if status == _HTTP_STATUS_FORBIDDEN:
+            # 403 = Cloudflare/DDoS-Guard protection, 513 = DiamWall
+            if status in (_HTTP_STATUS_FORBIDDEN, _HTTP_STATUS_DIAMWALL):
                 # If bypasser fallback is disabled, try mirrors instead
                 if not allow_bypasser_fallback:
                     new_url = _try_rotation(original_url, current_url, selector)
@@ -948,9 +958,9 @@ def download_url(
             status = _get_status_code(e)
             retryable = _is_retryable_error(e)
 
-            # Z-Library 403 - try refreshing cookies via bypasser once before giving up
+            # Z-Library 403 / 513 - try refreshing cookies via bypasser once before giving up
             if (
-                status == _HTTP_STATUS_FORBIDDEN
+                status in (_HTTP_STATUS_FORBIDDEN, _HTTP_STATUS_DIAMWALL)
                 and _is_cf_bypass_enabled()
                 and not zlib_cookie_refresh_attempted
             ):

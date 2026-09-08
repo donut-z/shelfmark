@@ -227,3 +227,22 @@ DDG_REPLAY_PER_CHECK_COOKIES = string_to_bool(os.getenv("DDG_REPLAY_PER_CHECK_CO
 # Kept for migration: if set, used to build initial SOURCE_PRIORITY config
 _LEGACY_PRIORITIZE_WELIB = string_to_bool(os.getenv("PRIORITIZE_WELIB", "false"))
 _LEGACY_ALLOW_USE_WELIB = string_to_bool(os.getenv("ALLOW_USE_WELIB", "true"))
+
+
+# =============================================================================
+# Z-Library Account & Session Configuration
+# =============================================================================
+
+def _clean_env_str(val: str | None) -> str | None:
+    if not val:
+        return None
+    cleaned = val.strip()
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned or None
+
+ZLIB_EMAIL = _clean_env_str(os.getenv("ZLIB_EMAIL"))
+ZLIB_PASSWORD = _clean_env_str(os.getenv("ZLIB_PASSWORD"))
+ZLIB_REMIX_USERID = _clean_env_str(os.getenv("ZLIB_REMIX_USERID"))
+ZLIB_REMIX_USERKEY = _clean_env_str(os.getenv("ZLIB_REMIX_USERKEY"))
+

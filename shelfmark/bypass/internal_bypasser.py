@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import random
+import shutil
 import signal
 import socket
 import stat
@@ -27,14 +28,22 @@ from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.connection import ProtocolException
 
 from shelfmark.bypass import BypassCancelledError
-from shelfmark.bypass.challenge import CLOUDFLARE_INDICATORS, DDOS_GUARD_INDICATORS
+from shelfmark.bypass.challenge import (
+    CLOUDFLARE_INDICATORS,
+    DDOS_GUARD_INDICATORS,
+    DIAMWALL_INDICATORS,
+)
 from shelfmark.bypass.cookie_store import (
+    _get_base_domain,
+    _get_full_cookie_domains,
     clear_cf_cookies,
     export_store,
     get_cf_cookies_for_domain,
     get_cf_user_agent_for_domain,
+    get_zlib_auth_cookies,
     import_store,
     store_extracted_cookies,
+    store_zlib_auth_cookies,
 )
 from shelfmark.bypass.fingerprint import get_screen_size
 from shelfmark.config import env
@@ -478,6 +487,11 @@ async def _detect_challenge_type(page: Any) -> str:
     """Detect challenge type: 'cloudflare', 'ddos_guard', or 'none'."""
     title, body, current_url = await _get_page_info(page)
 
+    # DiamWall indicators
+    if found := _check_indicators(title, body, DIAMWALL_INDICATORS):
+        logger.debug("DiamWall indicator found: '%s'", found)
+        return "diamwall"
+
     # DDOS-Guard indicators
     if found := _check_indicators(title, body, DDOS_GUARD_INDICATORS):
         logger.debug("DDOS-Guard indicator found: '%s'", found)
@@ -514,7 +528,9 @@ async def _is_bypassed(page: Any, *, escape_emojis: bool = True) -> bool:
             return True
 
     # Check for protection indicators (means NOT bypassed)
-    if _check_indicators(title, body, CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS):
+    if _check_indicators(
+        title, body, CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS + DIAMWALL_INDICATORS
+    ):
         return False
 
     # Cloudflare URL patterns
@@ -875,9 +891,116 @@ async def _read_page_source(page: Any) -> str:
     return await element.get_html_async()
 
 
+async def _ensure_zlib_auth(
+    driver: Any,
+    url: str,
+    cancel_flag: Event | None = None,
+    status_callback: Any = None,
+) -> None:
+    """Ensure Z-Library authentication cookies are present and injected into driver."""
+    from mycdp import network as cdp_network
+
+    base_domain = _get_base_domain(urlparse(url).hostname or "")
+    if base_domain not in _get_full_cookie_domains():
+        return
+
+    auth_cookies = get_zlib_auth_cookies()
+    if auth_cookies.get("remix_userid") and auth_cookies.get("remix_userkey"):
+        logger.debug("Injecting existing Z-Library auth cookies for %s", base_domain)
+        params = [
+            cdp_network.CookieParam(
+                name="remix_userid",
+                value=str(auth_cookies["remix_userid"]),
+                domain=f".{base_domain}",
+                path="/",
+            ),
+            cdp_network.CookieParam(
+                name="remix_userkey",
+                value=str(auth_cookies["remix_userkey"]),
+                domain=f".{base_domain}",
+                path="/",
+            ),
+        ]
+        await driver.cookies.set_all(params)
+        return
+
+    # No cookies stored yet; check if email & password are provided in env
+    if not env.ZLIB_EMAIL or not env.ZLIB_PASSWORD:
+        logger.debug("No Z-Library credentials configured in .env, continuing as guest")
+        return
+
+    logger.info("Performing automated Z-Library login for %s...", base_domain)
+    if status_callback:
+        status_callback("resolving", "Logging in to Z-Library")
+
+    homepage_url = f"https://{base_domain}/"
+    page = await driver.get(homepage_url)
+    with suppress(Exception):
+        await page.wait()
+
+    # Wait for DiamWall to clear if present on homepage
+    if not await _is_bypassed(page):
+        await _wait_for_passive_solve(page, cancel_flag)
+
+    _check_cancellation(cancel_flag, "Cancelled before Z-Library login")
+
+    # Open login modal
+    await page.evaluate('''
+        (() => {
+            const btn = document.querySelector('a[data-action="login"], a[href*="/login"]');
+            if (btn) btn.click();
+        })()
+    ''')
+    await asyncio.sleep(2)
+
+    # Fill email & password and submit
+    await page.evaluate(f'''
+        (() => {{
+            const form = document.getElementById('loginForm') || document.querySelector('form[action*="login"]');
+            if (!form) return;
+            const emailInput = form.querySelector('input[name="email"]');
+            const passInput = form.querySelector('input[name="password"]');
+            if (emailInput) emailInput.value = {json.dumps(env.ZLIB_EMAIL)};
+            if (passInput) passInput.value = {json.dumps(env.ZLIB_PASSWORD)};
+            const submitBtn = form.querySelector('button[type="submit"], input[type="submit"]');
+            if (submitBtn) submitBtn.click();
+        }})()
+    ''')
+
+    # Wait for login redirect & cookies
+    await asyncio.sleep(6)
+    all_cookies = await driver.cookies.get_all()
+    cookie_dict = {getattr(c, "name", None): getattr(c, "value", None) for c in all_cookies}
+    uid = cookie_dict.get("remix_userid")
+    ukey = cookie_dict.get("remix_userkey")
+
+    if uid and ukey:
+        logger.info("Z-Library login successful! User ID: %s", uid)
+        store_zlib_auth_cookies(str(uid), str(ukey))
+        params = [
+            cdp_network.CookieParam(
+                name="remix_userid",
+                value=str(uid),
+                domain=f".{base_domain}",
+                path="/",
+            ),
+            cdp_network.CookieParam(
+                name="remix_userkey",
+                value=str(ukey),
+                domain=f".{base_domain}",
+                path="/",
+            ),
+        ]
+        await driver.cookies.set_all(params)
+    else:
+        logger.warning("Z-Library login submitted but remix_* cookies not detected")
+
+
 async def _get(url: str, driver: Any, cancel_flag: Event | None = None) -> str:
     """Fetch URL with Cloudflare bypass using a CDP browser."""
     _check_cancellation(cancel_flag, "Bypass cancelled before starting")
+
+    await _ensure_zlib_auth(driver, url, cancel_flag)
 
     logger.debug("CDP_GET: %s", url)
 
@@ -983,6 +1106,130 @@ def _run_bypass_in_current_process(url: str, retry: int, cancel_flag: Event | No
     # accord, so reaching this deadline now means a wedged session rather than a stubborn
     # challenge - which is the only case worth reporting as a timeout.
     return _CDP_WORKER.run(_run_bypass(), timeout=timeout)
+
+
+def _run_browser_download_in_current_process(
+    url: str,
+    destination_dir: Path,
+    cancel_flag: Event | None = None,
+    status_callback: Any = None,
+) -> Path:
+    """Run the browser download flow in the current process."""
+    timeout = (
+        _CHILD_BYPASS_TIMEOUT_SECONDS
+        if os.environ.get(_BYPASS_CHILD_ENV) == "1"
+        else _IN_PROCESS_BYPASS_TIMEOUT_SECONDS
+    )
+
+    async def _run_download() -> Path:
+        driver = None
+        try:
+            driver = await _create_cdp_browser(url)
+
+            # Step 1: Ensure Z-Library authentication if applicable
+            await _ensure_zlib_auth(driver, url, cancel_flag, status_callback)
+
+            # Step 2: Navigate to book page
+            if status_callback:
+                status_callback("resolving", "Opening book page")
+            page = await driver.get(url)
+            with suppress(Exception):
+                await page.wait()
+
+            _check_cancellation(cancel_flag, "Download cancelled after page load")
+
+            # Step 3: Check protection/challenge
+            if not await _is_bypassed(page):
+                logger.info("DiamWall / protection detected on book page, waiting for solve...")
+                if status_callback:
+                    status_callback("resolving", "Solving DiamWall protection")
+                if not await _wait_for_passive_solve(page, cancel_flag):
+                    if not await _bypass(page, cancel_flag=cancel_flag):
+                        msg = f"Could not bypass protection for {url}"
+                        raise RuntimeError(msg)
+
+            await _extract_cookies_from_cdp(driver, page, url)
+
+            # Step 4: Find download link / button
+            if status_callback:
+                status_callback("resolving", "Locating download button")
+            dl_info = None
+            for _ in range(15):
+                _check_cancellation(cancel_flag, "Download cancelled")
+                dl_info = await page.evaluate('''
+                    (() => {
+                        const btn = document.querySelector('a.addDownloadedBook, a[href*="/dl/"]');
+                        return btn ? {href: btn.href, text: btn.innerText} : null;
+                    })()
+                ''')
+                if dl_info and dl_info.get("href"):
+                    break
+                await asyncio.sleep(1)
+
+            if not dl_info or not dl_info.get("href"):
+                error_msg = await page.evaluate('''
+                    (() => {
+                        const el = document.querySelector('.alert, .error, .limits-exceeded, .color-red');
+                        return el ? el.innerText : null;
+                    })()
+                ''')
+                if error_msg:
+                    msg = f"Z-Library download unavailable: {error_msg}"
+                    raise RuntimeError(msg)
+                msg = f"Could not find download button on {url}"
+                raise RuntimeError(msg)
+
+            logger.info("Triggering browser download: %s (%s)", dl_info.get("href"), dl_info.get("text"))
+            if status_callback:
+                status_callback("downloading", f"Downloading via browser ({dl_info.get('text', '')})")
+
+            # Step 5: Record baseline files in SELENIUMBASE_DOWNLOADS_DIR
+            SELENIUMBASE_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            existing_files = {p.name for p in SELENIUMBASE_DOWNLOADS_DIR.iterdir()}
+
+            # Trigger download
+            await page.evaluate('''
+                (() => {
+                    const btn = document.querySelector('a.addDownloadedBook, a[href*="/dl/"]');
+                    if (btn) btn.click();
+                })()
+            ''')
+
+            # Step 6: Wait for download to complete
+            download_deadline = time.monotonic() + 180.0
+            downloaded_file = None
+            while time.monotonic() < download_deadline:
+                _check_cancellation(cancel_flag, "Download cancelled while receiving file")
+                current_paths = [p for p in SELENIUMBASE_DOWNLOADS_DIR.iterdir() if p.name not in existing_files]
+                in_progress = any(p.name.endswith(".crdownload") or p.name.endswith(".tmp") for p in current_paths)
+                completed = [
+                    p for p in current_paths
+                    if not p.name.endswith(".crdownload") and not p.name.endswith(".tmp") and p.is_file() and p.stat().st_size > 0
+                ]
+                if completed and not in_progress:
+                    downloaded_file = completed[0]
+                    break
+                await asyncio.sleep(0.5)
+
+            if not downloaded_file or not downloaded_file.exists():
+                msg = f"Browser download timed out or produced no file for {url}"
+                raise TimeoutError(msg)
+
+            logger.info("Browser download complete: %s (%s bytes)", downloaded_file.name, downloaded_file.stat().st_size)
+
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            target = destination_dir / downloaded_file.name
+            if target.exists():
+                target.unlink()
+            shutil.move(str(downloaded_file), str(target))
+            return target
+        finally:
+            if driver:
+                await _close_cdp_driver(driver)
+            else:
+                _reset_virtual_display()
+
+    return _CDP_WORKER.run(_run_download(), timeout=timeout)
 
 
 def _store_child_bypass_state(payload: dict[str, Any]) -> None:
@@ -1299,6 +1546,64 @@ def get(url: str, retry: int | None = None, cancel_flag: Event | None = None) ->
         if env.DOCKERMODE and os.environ.get(_BYPASS_CHILD_ENV) != "1":
             return _get_via_subprocess(url, retry, cancel_flag)
         return _run_bypass_in_current_process(url, retry, cancel_flag)
+
+
+def _download_via_subprocess(
+    url: str,
+    destination_dir: Path,
+    cancel_flag: Event | None = None,
+    status_callback: Any = None,
+) -> Path | None:
+    """Run browser download in the helper subprocess."""
+    _check_cancellation(cancel_flag, "Download cancelled before helper process")
+    result_path = (
+        Path(tempfile.gettempdir()) / f"shelfmark-download-{os.getpid()}-{time.time_ns()}.json"
+    )
+    payload = {
+        "action": "download",
+        "url": url,
+        "destination_dir": str(destination_dir),
+        "result_path": str(result_path),
+        "dns_config": network.get_dns_config(),
+    }
+    result = _BYPASS_HELPER.run(payload, _BYPASS_SUBPROCESS_TIMEOUT_SECONDS, cancel_flag)
+
+    if not isinstance(result, dict):
+        msg = "Internal bypasser helper returned an invalid download result"
+        raise TypeError(msg)
+
+    if not result.get("ok"):
+        error_type = result.get("error_type", "RuntimeError")
+        error = result.get("error", "Internal bypasser helper download failed")
+        trace = result.get("traceback")
+        if trace:
+            logger.debug("Internal bypasser download helper traceback: %s", trace)
+        if any(keyword in error.lower() for keyword in ("browser", "cdp", "timeout", "x server", "display")):
+            logger.info("Discarding bypass helper after browser error: %s", error)
+            _BYPASS_HELPER._discard(wait_for_exit=False)
+        msg = f"{error_type}: {error}"
+        raise RuntimeError(msg)
+
+    _store_child_bypass_state(result)
+    downloaded_path = result.get("downloaded_path")
+    if downloaded_path and Path(downloaded_path).exists():
+        return Path(downloaded_path)
+    return None
+
+
+def download_via_browser(
+    url: str,
+    destination_dir: Path,
+    cancel_flag: Event | None = None,
+    status_callback: Any = None,
+) -> Path | None:
+    """Download a book file via browser CDP (for DiamWall/Z-Library)."""
+    with LOCKED:
+        if env.DOCKERMODE and os.environ.get(_BYPASS_CHILD_ENV) != "1":
+            return _download_via_subprocess(url, destination_dir, cancel_flag, status_callback)
+        return _run_browser_download_in_current_process(
+            url, destination_dir, cancel_flag, status_callback
+        )
 
 
 def _get_proxy_string(url: str) -> str | None:
@@ -1834,6 +2139,7 @@ def _handle_child_request(request_line: str) -> int:
     request = json.loads(request_line or "{}")
     result_path = Path(str(request["result_path"]))
     url = str(request["url"])
+    action = request.get("action", "get")
     retry = _coerce_positive_int(
         request.get("retry"), _coerce_positive_int(app_config.MAX_RETRY, 10)
     )
@@ -1841,6 +2147,29 @@ def _handle_child_request(request_line: str) -> int:
     dns_config = request.get("dns_config")
     if isinstance(dns_config, dict):
         _apply_parent_dns_config(dns_config)
+
+    if action == "download":
+        destination_dir = Path(str(request["destination_dir"]))
+        try:
+            downloaded_path = _run_browser_download_in_current_process(url, destination_dir)
+            cookies, user_agents = export_store()
+            payload = {
+                "ok": True,
+                "downloaded_path": str(downloaded_path),
+                "cookies": cookies,
+                "user_agents": user_agents,
+            }
+            _publish_result(result_path, payload)
+        except Exception as exc:  # noqa: BLE001 - helper boundary must serialize failures.
+            payload = {
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            _publish_result(result_path, payload)
+            return 1
+        return 0
 
     # The parent owns the cookie store; this process only solves. Starting each request
     # from an empty store is what a helper spawned per request gave for free, and losing

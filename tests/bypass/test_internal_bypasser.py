@@ -524,7 +524,9 @@ def test_cleanup_only_kills_own_and_abandoned_browser_sessions(monkeypatch, tmp_
     monkeypatch.setattr(internal_bypasser, "_PROC_ROOT", proc_root)
     monkeypatch.setattr(internal_bypasser.os, "getpid", lambda: 1000)
     monkeypatch.setattr(internal_bypasser.os, "getpgrp", lambda: 1000)
-    monkeypatch.setattr(internal_bypasser.os, "kill", lambda pid, _sig: killed.append(pid))
+    monkeypatch.setattr(
+        internal_bypasser.os, "kill", lambda pid, _sig: killed.append(pid) if _sig else None
+    )
     monkeypatch.setattr(internal_bypasser.time, "sleep", lambda _seconds: None)
 
     assert internal_bypasser._cleanup_orphan_processes() == 3

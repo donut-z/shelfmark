@@ -124,10 +124,9 @@ def check_url_live(url, timeout=8):
             # Lees een klein beetje data om de verbinding te bevestigen
             resp.read(512)
             return resp.status < 500
-    except urllib.error.HTTPError as e:
-        # Status 403 (challenge), 429 (rate-limit), 401 (auth), 405 (method)
+        # Status 403 / 503 / 513 (WAF challenge), 429 (rate-limit), 401 (auth), 405 (method)
         # of redirects (301, 302, 307, 308) betekenen dat de server actief is en reageert.
-        return e.code in [301, 302, 307, 308, 401, 403, 405, 429]
+        return e.code in [301, 302, 307, 308, 401, 403, 405, 429, 503, 513]
     except Exception:
         return False
 
@@ -233,7 +232,7 @@ def get_docker_cmd(service="shelfmark", container=None):
     target = container or service
     user = get_container_user(target)
     if container:
-        return ["docker", "exec", "-u", user, container]
+        return ["docker", "exec", "-w", "/tmp", "-u", user, container]
 
     try:
         res = subprocess.run(
@@ -243,11 +242,11 @@ def get_docker_cmd(service="shelfmark", container=None):
             text=True
         )
         if res.returncode == 0 and res.stdout.strip():
-            return ["docker", "compose", "exec", "-T", "-u", user, service]
+            return ["docker", "compose", "exec", "-T", "-w", "/tmp", "-u", user, service]
     except Exception:
         pass
 
-    return ["docker", "exec", "-u", user, service]
+    return ["docker", "exec", "-w", "/tmp", "-u", user, service]
 
 
 
@@ -272,8 +271,8 @@ def restart_container(service="shelfmark", container=None):
 
 def prewarm_mirrors(service="shelfmark", container=None):
     """
-    Verzamelt en vernieuwt proactief cookies voor alle geconfigureerde AA mirrors.
-    Draait een eenmalige lichte zoekopdracht in de container per mirror.
+    Verzamelt en vernieuwt proactief cookies voor alle geconfigureerde AA en Z-Library mirrors.
+    Draait een eenmalige lichte zoekopdracht/fetch in de container per mirror.
     Als de cookies al geldig zijn duurt dit <1s; als ze ontbreken of verlopen zijn
     wordt de CDP bypasser automatisch aangeroepen en worden verse cookies opgeslagen in clearance_cookies.json.
     """
@@ -283,12 +282,24 @@ def prewarm_mirrors(service="shelfmark", container=None):
         "import time\n"
         "from shelfmark.download.http import html_get_page\n"
         "from shelfmark.download import network\n"
+        "from shelfmark.core.mirrors import get_zlib_mirrors\n"
+        "from shelfmark.bypass.internal_bypasser import get_bypassed_page\n"
         "urls = network.get_available_aa_urls()\n"
-        "print(f'[*] Mirrors in scope: {urls}')\n"
+        "print(f'[*] AA mirrors in scope: {urls}')\n"
         "for url in urls:\n"
-        "    print(f'[*] Pre-warming {url}...')\n"
+        "    print(f'[*] Pre-warming AA: {url}...')\n"
         "    try:\n"
         "        html = html_get_page(f'{url}/search?q=warmup', allow_bypasser_fallback=True)\n"
+        "        print(f'[✓] {url} is gereed ({len(html)} bytes)')\n"
+        "    except Exception as e:\n"
+        "        print(f'[!] {url} mislukt: {e}')\n"
+        "    time.sleep(2)\n"
+        "zlib_urls = get_zlib_mirrors()\n"
+        "print(f'[*] Z-Library mirrors in scope: {zlib_urls}')\n"
+        "for url in zlib_urls:\n"
+        "    print(f'[*] Pre-warming Z-Library: {url}...')\n"
+        "    try:\n"
+        "        html = get_bypassed_page(f'{url}/')\n"
         "        print(f'[✓] {url} is gereed ({len(html)} bytes)')\n"
         "    except Exception as e:\n"
         "        print(f'[!] {url} mislukt: {e}')\n"
@@ -302,7 +313,7 @@ def prewarm_mirrors(service="shelfmark", container=None):
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
-            timeout=180
+            timeout=300
         )
         if res.stdout:
             print(res.stdout.strip())
@@ -311,7 +322,7 @@ def prewarm_mirrors(service="shelfmark", container=None):
         else:
             print(f"[!] Pre-warming gaf exit code {res.returncode}: {res.stderr.strip()}")
     except subprocess.TimeoutExpired:
-        print("[!] Pre-warming time-out na 180s.")
+        print("[!] Pre-warming time-out na 300s.")
     except Exception as e:
         print(f"[!] Fout bij uitvoeren van pre-warming: {e}")
 
