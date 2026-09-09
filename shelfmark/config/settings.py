@@ -1510,6 +1510,16 @@ def download_source_settings() -> list[SettingsField]:
             default=False,
         ),
         CheckboxField(
+            key="ENABLE_ANNAS_ARCHIVE",
+            label="Enable Anna's Archive",
+            description=(
+                "Use Anna's Archive for searching releases and download mirrors. "
+                "When disabled, searches and downloads query direct mirrors (e.g. Z-Library) without contacting Anna's Archive."
+            ),
+            default=True,
+            show_when={"field": "DIRECT_DOWNLOAD_ENABLED", "value": True},
+        ),
+        CheckboxField(
             key="DIRECT_DOWNLOAD_LANGUAGE_FROM_PATH",
             label="Detect Language From Distant Path",
             description=(

@@ -483,6 +483,8 @@ def _get_source_priority() -> list[SourcePriorityEntry]:
     """
     from shelfmark.core import mirrors
 
+    enable_aa = config.get("ENABLE_ANNAS_ARCHIVE", True)
+
     fast_sources = _parse_source_priority_entries(
         config.get("FAST_SOURCES_DISPLAY"),
         allowed_ids={"aa-fast", "libgen"},
@@ -490,8 +492,9 @@ def _get_source_priority() -> list[SourcePriorityEntry]:
     has_donator_key = bool(config.get("AA_DONATOR_KEY"))
 
     for source in fast_sources:
-        if (not mirrors.has_download_source_mirror_configuration(source["id"])) or (
-            source["id"] == "aa-fast" and not has_donator_key
+        if (
+            (not mirrors.has_download_source_mirror_configuration(source["id"]))
+            or (source["id"] == "aa-fast" and (not has_donator_key or not enable_aa))
         ):
             source["enabled"] = False
 
@@ -500,7 +503,9 @@ def _get_source_priority() -> list[SourcePriorityEntry]:
         excluded_ids={"aa-fast", "libgen"},
     )
     for source in slow_sources:
-        if not mirrors.has_download_source_mirror_configuration(source["id"]):
+        if (not mirrors.has_download_source_mirror_configuration(source["id"])) or (
+            source["id"] in ("aa-slow-nowait", "aa-slow-wait", "aa-slow") and not enable_aa
+        ):
             source["enabled"] = False
 
     return fast_sources + slow_sources
@@ -526,11 +531,18 @@ def _get_direct_download_unavailable_reason() -> str | None:
             "Direct Download is disabled. Enable the source in Settings and add your mirror URLs."
         )
 
-    if not mirrors.has_aa_mirror_configuration():
-        return (
-            "Direct Download is not configured. Add at least one Anna's Archive mirror URL in "
-            "Settings."
-        )
+    enable_aa = config.get("ENABLE_ANNAS_ARCHIVE", True)
+    if enable_aa:
+        if not mirrors.has_aa_mirror_configuration():
+            return (
+                "Direct Download is not configured. Add at least one Anna's Archive mirror URL in "
+                "Settings."
+            )
+    else:
+        if not mirrors.has_zlib_mirror_configuration() and not mirrors.has_libgen_mirror_configuration():
+            return (
+                "Anna's Archive is disabled, but no Z-Library or Libgen mirrors are configured. Add a mirror in Settings."
+            )
 
     return None
 
@@ -787,7 +799,106 @@ def _fetch_search_table_uncached(
         attempt_url = selector.rewrite(url)
         logger.info("Retrying search on %s", new_base)
 
-    return "", None
+def _search_zlib_books(query: str, filters: SearchFilters) -> list[BrowseRecord]:
+    """Search Z-Library directly for books when Anna's Archive is disabled."""
+    from shelfmark.core import mirrors
+    from shelfmark.download import http as downloader
+
+    zlib_base = mirrors.get_primary_zlib_mirror()
+    if not zlib_base:
+        zlib_mirrors = mirrors.get_zlib_mirrors()
+        zlib_base = zlib_mirrors[0] if zlib_mirrors else "https://z-library.sk"
+
+    lang_param = ""
+    if filters.lang and filters.lang != ["all"]:
+        for i, l in enumerate(filters.lang):
+            if l:
+                lang_param += f"&languages%5B{i}%5D={quote(l.lower())}"
+
+    search_query = query
+    if filters.isbn:
+        search_query = filters.isbn[0]
+
+    search_url = f"{zlib_base.rstrip('/')}/s/{quote(search_query)}?{lang_param.lstrip('&')}"
+    logger.info("Direct Z-Library search: %s", search_url)
+
+    try:
+        html = downloader.html_get_page(search_url, allow_bypasser_fallback=True)
+    except Exception as e:
+        logger.warning("Z-Library direct search error: %s", e)
+        return []
+
+    if not html:
+        return []
+
+    text = _html_response_text(html)
+    soup = BeautifulSoup(text, "html.parser")
+
+    results: list[BrowseRecord] = []
+    bookcards = soup.select("z-bookcard") or soup.select(".book-item, .resItemBox")
+    for card in bookcards:
+        try:
+            title_elem = card.select_one("[slot='title'], .title, h3")
+            title = title_elem.text.strip() if title_elem else ""
+            if not title and card.get("data-title"):
+                title = str(card.get("data-title"))
+            if not title:
+                continue
+
+            author_elem = card.select_one("[slot='author'], .author")
+            author = author_elem.text.strip() if author_elem else ""
+
+            publisher_elem = card.select_one("[slot='publisher'], .publisher")
+            publisher = publisher_elem.text.strip() if publisher_elem else ""
+
+            year_elem = card.select_one("[slot='year'], .year")
+            year = year_elem.text.strip() if year_elem else ""
+
+            lang_elem = card.select_one("[slot='language'], .language")
+            language = lang_elem.text.strip() if lang_elem else "English"
+
+            extension_elem = card.select_one("[slot='extension'], .property__file")
+            ext = extension_elem.text.strip().lower() if extension_elem else "epub"
+
+            size_elem = card.select_one("[slot='filesize'], .property__file-size")
+            size = size_elem.text.strip() if size_elem else ""
+
+            link_elem = card.select_one("a[href*='/book/']")
+            book_href = link_elem.get("href") if link_elem else ""
+            if not book_href and card.get("href"):
+                book_href = str(card.get("href"))
+
+            if not book_href:
+                continue
+
+            if not book_href.startswith("http"):
+                download_url = f"{zlib_base.rstrip('/')}/{book_href.lstrip('/')}"
+            else:
+                download_url = book_href
+
+            book_id = book_href.strip("/").split("/")[-1]
+
+            results.append(
+                BrowseRecord(
+                    id=book_id,
+                    title=title,
+                    source="direct",
+                    author=author,
+                    publisher=publisher,
+                    year=year,
+                    language=language,
+                    format=ext,
+                    size=size,
+                    download_urls=[download_url],
+                    source_url=download_url,
+                )
+            )
+        except Exception as err:
+            logger.debug("Error parsing Z-Lib card: %s", err)
+            continue
+
+    logger.info("Found %d direct Z-Library books for query '%s'", len(results), query)
+    return results
 
 
 def search_books(query: str, filters: SearchFilters) -> list[BrowseRecord]:
@@ -805,6 +916,10 @@ def search_books(query: str, filters: SearchFilters) -> list[BrowseRecord]:
         Exception: If parsing fails
 
     """
+    enable_aa = config.get("ENABLE_ANNAS_ARCHIVE", True)
+    if not enable_aa:
+        return _search_zlib_books(query, filters)
+
     query_html = quote(query)
 
     if filters.isbn:
