@@ -29,6 +29,9 @@ _cf_cookies_lock = threading.RLock()
 # User-Agent storage - Cloudflare ties cf_clearance to the UA that solved the challenge
 _cf_user_agents: dict[str, str] = {}
 
+# Persistent in-memory cache for Z-Library account auth cookies (never wiped by CF purges)
+_zlib_auth_cache: dict[str, str] = {}
+
 
 def _cookie_file_path() -> Path:
     config_dir = Path(os.environ.get("CONFIG_DIR", "/config"))
@@ -71,6 +74,9 @@ def _load_store_from_disk() -> None:
                 for domain, domain_cookies in cookies.items():
                     if domain not in _cf_cookies and isinstance(domain_cookies, dict):
                         _cf_cookies[domain] = domain_cookies
+                    if isinstance(domain_cookies, dict) and "remix_userid" in domain_cookies and "remix_userkey" in domain_cookies:
+                        _zlib_auth_cache["remix_userid"] = str(domain_cookies["remix_userid"]["value"])
+                        _zlib_auth_cache["remix_userkey"] = str(domain_cookies["remix_userkey"]["value"])
             if isinstance(uas, dict):
                 for domain, ua in uas.items():
                     if domain not in _cf_user_agents and isinstance(ua, str):
@@ -268,10 +274,10 @@ def get_zlib_auth_cookies() -> dict[str, str]:
     """Get stored or env Z-Library auth cookies (remix_userid, remix_userkey)."""
     from shelfmark.config import env
 
-    userid = env.ZLIB_REMIX_USERID
-    userkey = env.ZLIB_REMIX_USERKEY
+    userid = env.ZLIB_REMIX_USERID or _zlib_auth_cache.get("remix_userid")
+    userkey = env.ZLIB_REMIX_USERKEY or _zlib_auth_cache.get("remix_userkey")
     if userid and userkey:
-        return {"remix_userid": userid, "remix_userkey": userkey}
+        return {"remix_userid": str(userid), "remix_userkey": str(userkey)}
 
     with _cf_cookies_lock:
         if not _cf_cookies:
@@ -282,6 +288,8 @@ def get_zlib_auth_cookies() -> dict[str, str]:
                 uid_c = domain_cookies["remix_userid"]
                 ukey_c = domain_cookies["remix_userkey"]
                 if not _is_cookie_expired(uid_c) and not _is_cookie_expired(ukey_c):
+                    _zlib_auth_cache["remix_userid"] = str(uid_c["value"])
+                    _zlib_auth_cache["remix_userkey"] = str(ukey_c["value"])
                     return {
                         "remix_userid": str(uid_c["value"]),
                         "remix_userkey": str(ukey_c["value"]),
@@ -293,6 +301,8 @@ def store_zlib_auth_cookies(userid: str, userkey: str) -> None:
     """Store Z-Library auth cookies for all configured Z-Library domains."""
     if not userid or not userkey:
         return
+    _zlib_auth_cache["remix_userid"] = str(userid)
+    _zlib_auth_cache["remix_userkey"] = str(userkey)
     with _cf_cookies_lock:
         for domain in _get_full_cookie_domains():
             existing = _cf_cookies.setdefault(domain, {})
@@ -399,16 +409,34 @@ def import_store(cookies: object, user_agents: object) -> None:
 
 
 def clear_cf_cookies(domain: str | None = None) -> None:
-    """Clear stored Cloudflare cookies and User-Agent."""
+    """Clear stored Cloudflare cookies and User-Agent, preserving persistent auth cookies."""
     with _cf_cookies_lock:
         if domain:
             base_domain = _get_base_domain(domain)
-            _cf_cookies.pop(base_domain, None)
+            domain_cookies = _cf_cookies.get(base_domain)
             _cf_user_agents.pop(base_domain, None)
+            if isinstance(domain_cookies, dict):
+                saved_uid = domain_cookies.get("remix_userid")
+                saved_ukey = domain_cookies.get("remix_userkey")
+                _cf_cookies[base_domain] = {}
+                if saved_uid:
+                    _cf_cookies[base_domain]["remix_userid"] = saved_uid
+                if saved_ukey:
+                    _cf_cookies[base_domain]["remix_userkey"] = saved_ukey
+            else:
+                _cf_cookies.pop(base_domain, None)
             _save_store_to_disk()
         else:
+            saved_auth: dict[str, dict] = {}
+            for d, d_cookies in _cf_cookies.items():
+                if isinstance(d_cookies, dict):
+                    uid = d_cookies.get("remix_userid")
+                    ukey = d_cookies.get("remix_userkey")
+                    if uid and ukey:
+                        saved_auth[d] = {"remix_userid": uid, "remix_userkey": ukey}
             _cf_cookies.clear()
             _cf_user_agents.clear()
+            _cf_cookies.update(saved_auth)
             _save_store_to_disk()
 
 
