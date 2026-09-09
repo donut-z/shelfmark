@@ -828,7 +828,15 @@ def _search_zlib_books(query: str, filters: SearchFilters) -> list[BrowseRecord]
         html = downloader.html_get_page(search_url, allow_bypasser_fallback=True)
     except Exception as e:
         logger.warning("Z-Library direct search error: %s", e)
-        return []
+        html = None
+
+    if not html:
+        try:
+            logger.info("Retrying Z-Library direct search with bypasser: %s", search_url)
+            html = downloader.html_get_page(search_url, use_bypasser=True, allow_bypasser_fallback=True)
+        except Exception as e:
+            logger.warning("Z-Library direct search bypasser error: %s", e)
+            return []
 
     if not html:
         return []

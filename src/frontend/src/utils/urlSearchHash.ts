@@ -1,3 +1,4 @@
+import { DEFAULT_SUPPORTED_FORMATS } from '../data/languages';
 import type { AdvancedFilterState, ContentType } from '../types';
 
 export interface UrlSearchHashState {
@@ -52,10 +53,17 @@ export const buildUrlSearchHash = (state: UrlSearchHashState): string => {
   if (sort) params.set('sort', sort);
   if (content) params.set('content', content);
   for (const value of lang ?? []) {
-    if (value) params.append('lang', value);
+    if (value && value !== 'all') params.append('lang', value);
   }
-  for (const value of formats ?? []) {
-    if (value) params.append('format', value);
+  const isDefaultFormats =
+    !formats ||
+    formats.length === 0 ||
+    (formats.length >= DEFAULT_SUPPORTED_FORMATS.length &&
+      DEFAULT_SUPPORTED_FORMATS.every((f) => formats.includes(f)));
+  if (!isDefaultFormats) {
+    for (const value of formats ?? []) {
+      if (value) params.append('format', value);
+    }
   }
 
   return params.toString();

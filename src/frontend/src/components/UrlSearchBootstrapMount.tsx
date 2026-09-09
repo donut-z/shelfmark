@@ -169,11 +169,21 @@ export const UrlSearchBootstrapMount = ({
 
       const hasAdvancedValues = ADVANCED_FILTER_VISIBILITY_KEYS.some((key) => {
         const value = parsedParams.advancedFilters[key];
+        if (key === 'lang') {
+          return Array.isArray(value) && value.length > 0 && !value.every((v) => v === 'all');
+        }
+        if (key === 'formats') {
+          return false;
+        }
         return Array.isArray(value) ? value.length > 0 : Boolean(value);
       });
-      if (hasAdvancedValues) {
+      if (hasAdvancedValues && parsedSearchMode === 'direct') {
         setShowAdvanced(true);
       }
+    }
+
+    if (!targetQueryValue && !parsedParams.searchInput) {
+      return;
     }
 
     const mergedFilters: AdvancedFilterState = {

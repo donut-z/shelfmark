@@ -760,7 +760,10 @@ def html_get_page(
             # minutes-long browser solve would be the wrong answer to.
             if (
                 isinstance(e, requests.exceptions.TooManyRedirects)
-                and network.should_rotate_dns_for_url(current_url)
+                and (
+                    network.should_rotate_dns_for_url(current_url)
+                    or _is_configured_zlib_host(urlparse(current_url).hostname)
+                )
                 and _bypass_handoff_allowed()
             ):
                 logger.info("Redirect loop detected; switching to bypasser: %s", current_url)
