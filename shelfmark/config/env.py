@@ -246,3 +246,7 @@ ZLIB_PASSWORD = _clean_env_str(os.getenv("ZLIB_PASSWORD"))
 ZLIB_REMIX_USERID = _clean_env_str(os.getenv("ZLIB_REMIX_USERID"))
 ZLIB_REMIX_USERKEY = _clean_env_str(os.getenv("ZLIB_REMIX_USERKEY"))
 
+# Strategy for release searches: "title_author" (fast, high recall) or "isbn_first" (strict edition match)
+RELEASE_SEARCH_STRATEGY = os.getenv("RELEASE_SEARCH_STRATEGY", "title_author").strip().lower()
+
+

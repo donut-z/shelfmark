@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 
 from shelfmark.bypass.challenge import MAX_CHALLENGE_HTML_CHARS, challenge_marker
-from shelfmark.config.env import DEBUG_SKIP_SOURCES, TMP_DIR
+from shelfmark.config.env import DEBUG_SKIP_SOURCES, RELEASE_SEARCH_STRATEGY, TMP_DIR
 from shelfmark.core import search_deadline
 from shelfmark.core.config import config
 from shelfmark.core.languages import language_alias_map
@@ -2138,14 +2138,14 @@ class DirectDownloadSource(ReleaseSource):
             self._last_search_type = "manual" if query else "title_author"
             return [_browse_record_to_release(record) for record in results]
 
-        # ISBN search first (unless expand_search requested)
-        if plan.manual_query:
-            expand_search = True
+        # Search strategy: "title_author" (fast, high recall) or "isbn_first" (strict edition match)
+        strategy = RELEASE_SEARCH_STRATEGY or "title_author"
+        use_title_first = (strategy != "isbn_first") or expand_search
 
-        if not expand_search:
+        if not use_title_first:
             isbn = plan.isbn_candidates[0] if plan.isbn_candidates else None
             if isbn:
-                logger.debug("Searching direct_download: isbn='%s', langs=%s", isbn, lang_filter)
+                logger.debug("Searching direct_download (strategy=isbn_first): isbn='%s', langs=%s", isbn, lang_filter)
                 filters = SearchFilters(isbn=[isbn])
                 filters.lang = lang_filter if lang_filter is not None else []
                 try:
@@ -2217,6 +2217,20 @@ class DirectDownloadSource(ReleaseSource):
                     raise
                 except Exception:
                     logger.exception("Search error")
+        # Fallback to ISBN if Title+Author yielded no results and strategy was title_first
+        if not all_results and use_title_first and plan.isbn_candidates and not search_deadline.expired():
+            isbn = plan.isbn_candidates[0]
+            logger.debug("No title+author results, falling back to ISBN='%s'", isbn)
+            filters = SearchFilters(isbn=[isbn])
+            filters.lang = lang_filter if lang_filter is not None else []
+            try:
+                results = search_books(isbn, filters)
+                if results:
+                    logger.info("Found %s releases via ISBN fallback", len(results))
+                    self._last_search_type = "isbn"
+                    return [_browse_record_to_release(record) for record in results]
+            except Exception as e:
+                logger.warning("ISBN fallback search failed: %s", e)
 
         return [_browse_record_to_release(record) for record in all_results]
 

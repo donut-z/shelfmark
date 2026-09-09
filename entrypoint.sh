@@ -443,6 +443,7 @@ else
     if [ "${USING_EXTERNAL_BYPASSER}" != "true" ]; then
         ensure_symlinked_dir /app/downloaded_files /tmp/shelfmark/seleniumbase/downloaded_files
         ensure_symlinked_dir /app/archived_files /tmp/shelfmark/seleniumbase/archived_files
+        ensure_symlinked_dir /tmp/downloaded_files /tmp/shelfmark/seleniumbase/downloaded_files
 
         # Keep SeleniumBase's bundled drivers directory writable as well for
         # compatibility with legacy UC code paths that still probe bundled assets.

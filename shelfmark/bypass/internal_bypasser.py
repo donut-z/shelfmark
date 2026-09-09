@@ -87,6 +87,19 @@ def _patch_seleniumbase_runtime_dirs() -> None:
         ):
             if hasattr(constants.Files, attr):
                 setattr(constants.Files, attr, str(SELENIUMBASE_DOWNLOADS_DIR / f"{attr.lower()}.lock"))
+
+        # Remove any stale lock files from previous runs to prevent PermissionError
+        for lock_name in (
+            "pipfinding.lock",
+            "pipinstall.lock",
+            "dashboard.lock",
+            "driver_fixing_lock.lock",
+            "driver_repaired.lock",
+        ):
+            lock_path = SELENIUMBASE_DOWNLOADS_DIR / lock_name
+            if lock_path.exists():
+                with suppress(Exception):
+                    lock_path.unlink()
     except Exception as exc:
         logger.debug("Could not patch SeleniumBase runtime directories: %s", exc)
 

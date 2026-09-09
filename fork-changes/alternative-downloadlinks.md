@@ -1,8 +1,8 @@
 # Alternatieve Strategieën voor Downloadlinks Verzamelen
 
-> **Status:** Voorstel & Analyse  
+> **Status:** Geïmplementeerd (Optie C: Configureerbare Strategie met `title_author` als standaard)  
 > **Auteur:** Antigravity & User  
-> **Datum:** 8 september 2026  
+> **Datum:** 8 september 2026 (bijgewerkt 9 september 2026)  
 > **Betreft:** Optimalisatie van `ReleaseSearchPlan` en `direct_download.py` in Shelfmark  
 
 ---
