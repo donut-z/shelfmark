@@ -30,6 +30,13 @@ os.makedirs(os.path.join(_temp_base, "tmp"), exist_ok=True)
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+try:
+    from shelfmark.bypass.internal_bypasser import _patch_seleniumbase_runtime_dirs
+
+    _patch_seleniumbase_runtime_dirs()
+except Exception:
+    pass
+
 import pytest
 
 

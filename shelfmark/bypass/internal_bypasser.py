@@ -88,6 +88,24 @@ def _patch_seleniumbase_runtime_dirs() -> None:
             if hasattr(constants.Files, attr):
                 setattr(constants.Files, attr, str(SELENIUMBASE_DOWNLOADS_DIR / f"{attr.lower()}.lock"))
 
+        try:
+            from seleniumbase.core import download_helper
+
+            download_helper.DOWNLOADS_DIR = downloads_str
+            download_helper.downloads_path = downloads_str
+        except Exception:
+            pass
+
+        try:
+            from seleniumbase.undetected.cdp_driver import cdp_util
+            import fasteners
+
+            cdp_util.DOWNLOADS_FOLDER = downloads_str
+            cdp_util.PROXY_DIR_LOCK = str(SELENIUMBASE_DOWNLOADS_DIR / "proxy_dir.lock")
+            cdp_util.proxy_dir_lock = fasteners.InterProcessLock(cdp_util.PROXY_DIR_LOCK)
+        except Exception:
+            pass
+
         # Remove any stale lock files from previous runs to prevent PermissionError
         for lock_name in (
             "pipfinding.lock",
@@ -95,6 +113,7 @@ def _patch_seleniumbase_runtime_dirs() -> None:
             "dashboard.lock",
             "driver_fixing_lock.lock",
             "driver_repaired.lock",
+            "proxy_dir.lock",
         ):
             lock_path = SELENIUMBASE_DOWNLOADS_DIR / lock_name
             if lock_path.exists():
