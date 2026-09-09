@@ -102,3 +102,33 @@ def test_search_books_delegates_to_zlib_when_anna_disabled(monkeypatch):
     results = search_books("Dune", SearchFilters())
     assert results == mock_zlib_results
     mock_search.assert_called_once_with("Dune", SearchFilters())
+
+
+def test_search_zlib_books_parses_bookcards(monkeypatch):
+    import shelfmark.release_sources.direct_download as dd
+
+    sample_html = """
+    <html>
+      <body>
+        <z-bookcard id="998877" href="/book/998877/sample" download="/dl/998877/token" extension="epub" filesize="1.5 MB" year="2021" language="Dutch" publisher="SamplePub">
+          <span slot="title">Sample Title</span>
+          <span slot="author">Sample Author</span>
+        </z-bookcard>
+      </body>
+    </html>
+    """
+    monkeypatch.setattr("shelfmark.download.http.html_get_page", lambda url, **kwargs: sample_html)
+    monkeypatch.setattr("shelfmark.core.mirrors.get_zlib_primary_url", lambda: "https://z-library.sk")
+
+    results = dd._search_zlib_books("Sample Title", SearchFilters(lang=["Dutch"]))
+    assert len(results) == 1
+    rec = results[0]
+    assert rec.id == "998877"
+    assert rec.title == "Sample Title"
+    assert rec.author == "Sample Author"
+    assert rec.format == "epub"
+    assert rec.size == "1.5 MB"
+    assert rec.year == "2021"
+    assert rec.language == "Dutch"
+    assert rec.publisher == "SamplePub"
+    assert rec.download_urls == ["https://z-library.sk/dl/998877/token"]

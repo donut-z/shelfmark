@@ -422,12 +422,15 @@ def _book_matches_requested_languages(book_language: str | None, requested: set[
 
 
 def _is_configured_zlib_link(url: str) -> bool:
-    """Return True when a URL belongs to a configured Z-Library mirror."""
+    """Return True when a URL belongs to a configured or default Z-Library mirror."""
     from shelfmark.core.mirrors import get_zlib_cookie_domains
 
     hostname = (urlparse(url).hostname or "").lower()
     if not hostname:
         return False
+
+    if any(k in hostname for k in ["z-library", "1lib", "zlibrary", "singlelogin", "z-lib"]):
+        return True
 
     base_domain = ".".join(hostname.split(".")[-2:]) if "." in hostname else hostname
 
@@ -804,10 +807,9 @@ def _search_zlib_books(query: str, filters: SearchFilters) -> list[BrowseRecord]
     from shelfmark.core import mirrors
     from shelfmark.download import http as downloader
 
-    zlib_base = mirrors.get_primary_zlib_mirror()
-    if not zlib_base:
-        zlib_mirrors = mirrors.get_zlib_mirrors()
-        zlib_base = zlib_mirrors[0] if zlib_mirrors else "https://z-library.sk"
+    zlib_primary = mirrors.get_zlib_primary_url()
+    zlib_mirrors = mirrors.get_zlib_mirrors()
+    zlib_base = zlib_primary or (zlib_mirrors[0] if zlib_mirrors else "https://z-library.sk")
 
     lang_param = ""
     if filters.lang and filters.lang != ["all"]:
@@ -835,67 +837,108 @@ def _search_zlib_books(query: str, filters: SearchFilters) -> list[BrowseRecord]
     soup = BeautifulSoup(text, "html.parser")
 
     results: list[BrowseRecord] = []
-    bookcards = soup.select("z-bookcard") or soup.select(".book-item, .resItemBox")
+    bookcards = soup.select("z-bookcard")
     for card in bookcards:
         try:
-            title_elem = card.select_one("[slot='title'], .title, h3")
-            title = title_elem.text.strip() if title_elem else ""
-            if not title and card.get("data-title"):
-                title = str(card.get("data-title"))
-            if not title:
-                continue
+            card_id = card.get("id") or ""
+            download_path = card.get("download") or ""
+            book_href = card.get("href") or ""
 
-            author_elem = card.select_one("[slot='author'], .author")
-            author = author_elem.text.strip() if author_elem else ""
-
-            publisher_elem = card.select_one("[slot='publisher'], .publisher")
-            publisher = publisher_elem.text.strip() if publisher_elem else ""
-
-            year_elem = card.select_one("[slot='year'], .year")
-            year = year_elem.text.strip() if year_elem else ""
-
-            lang_elem = card.select_one("[slot='language'], .language")
-            language = lang_elem.text.strip() if lang_elem else "English"
-
-            extension_elem = card.select_one("[slot='extension'], .property__file")
-            ext = extension_elem.text.strip().lower() if extension_elem else "epub"
-
-            size_elem = card.select_one("[slot='filesize'], .property__file-size")
-            size = size_elem.text.strip() if size_elem else ""
-
-            link_elem = card.select_one("a[href*='/book/']")
-            book_href = link_elem.get("href") if link_elem else ""
-            if not book_href and card.get("href"):
-                book_href = str(card.get("href"))
-
-            if not book_href:
-                continue
-
-            if not book_href.startswith("http"):
-                download_url = f"{zlib_base.rstrip('/')}/{book_href.lstrip('/')}"
+            if download_path.startswith("/"):
+                download_url = f"{zlib_base.rstrip('/')}/{download_path.lstrip('/')}"
+            elif download_path:
+                download_url = download_path
+            elif book_href:
+                download_url = f"{zlib_base.rstrip('/')}/{book_href.lstrip('/')}" if not book_href.startswith("http") else book_href
             else:
-                download_url = book_href
+                download_url = ""
 
-            book_id = book_href.strip("/").split("/")[-1]
+            title_elem = card.select_one('[slot="title"]')
+            title = title_elem.get_text(strip=True) if title_elem else (card.get("title") or "Unknown Title")
+            if not title or title == "Unknown Title":
+                title_elem = card.select_one(".title, h3")
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+
+            author_elem = card.select_one('[slot="author"]')
+            author = author_elem.get_text(strip=True) if author_elem else (card.get("author") or "Unknown Author")
+            if not author or author == "Unknown Author":
+                author_elem = card.select_one(".author")
+                if author_elem:
+                    author = author_elem.get_text(strip=True)
+
+            extension = (card.get("extension") or "epub").lower().strip()
+            filesize = card.get("filesize") or ""
+            year = card.get("year") or None
+            publisher = card.get("publisher") or None
+            language = card.get("language") or "English"
+
+            book_id = str(card_id) if card_id else (book_href.strip("/").split("/")[-1] if book_href else str(len(results) + 1))
 
             results.append(
                 BrowseRecord(
                     id=book_id,
                     title=title,
-                    source="direct",
+                    source="direct_download",
                     author=author,
                     publisher=publisher,
                     year=year,
                     language=language,
-                    format=ext,
-                    size=size,
-                    download_urls=[download_url],
-                    source_url=download_url,
+                    format=extension,
+                    size=filesize,
+                    download_urls=[download_url] if download_url else [],
+                    source_url=download_url or (f"{zlib_base.rstrip('/')}/{book_href.lstrip('/')}" if book_href else None),
                 )
             )
         except Exception as err:
             logger.debug("Error parsing Z-Lib card: %s", err)
             continue
+
+    if not results:
+        # Fallback for legacy layout if z-bookcard not found
+        legacy_items = soup.select("div.resItemBox, tr.bookRow, div.book-item")
+        for item in legacy_items:
+            try:
+                title_el = item.select_one("h3[itemprop='name'] a, a[itemprop='name'], a.title")
+                if not title_el:
+                    continue
+                title = title_el.get_text(strip=True)
+                rel_href = title_el.get("href", "")
+                book_id = item.get("data-book_id") or rel_href.split("/")[-1].replace(".html", "")
+
+                author_el = item.select_one("div.authors a, a[itemprop='author'], .book-author")
+                author = author_el.get_text(strip=True) if author_el else "Unknown Author"
+
+                ext = "epub"
+                size = ""
+                year = None
+                for prop in item.select("div.property_value"):
+                    t = prop.get_text(strip=True)
+                    if any(t.lower().endswith(x) for x in ["kb", "mb", "gb"]):
+                        size = t
+                    elif t.lower() in ["epub", "pdf", "mobi", "azw3"]:
+                        ext = t.lower()
+                    elif t.isdigit() and len(t) == 4:
+                        year = t
+
+                download_url = f"{zlib_base.rstrip('/')}/{rel_href.lstrip('/')}" if not rel_href.startswith("http") else rel_href
+                results.append(
+                    BrowseRecord(
+                        id=str(book_id),
+                        title=title,
+                        source="direct_download",
+                        author=author,
+                        year=year,
+                        language="English",
+                        format=ext,
+                        size=size,
+                        download_urls=[download_url],
+                        source_url=download_url,
+                    )
+                )
+            except Exception as err:
+                logger.debug("Error parsing legacy Z-Lib item: %s", err)
+                continue
 
     logger.info("Found %d direct Z-Library books for query '%s'", len(results), query)
     return results
@@ -1438,6 +1481,21 @@ def _get_urls_for_source(
         return [url]
 
     # MD5-based sources - generate URL from template
+    if source_id == "zlib":
+        urls = list(book_info.download_urls)
+        if book_info.source_url and book_info.source_url not in urls:
+            urls.append(book_info.source_url)
+        if urls:
+            for u in urls:
+                _url_source_types[u] = "zlib"
+            return urls
+        template = _get_md5_url_template(source_id)
+        if template:
+            url = template.format(md5=book_info.id)
+            _url_source_types[url] = "zlib"
+            return [url]
+        return []
+
     template = _get_md5_url_template(source_id)
     if template:
         url = template.format(md5=book_info.id)
@@ -2069,6 +2127,11 @@ def _browse_record_to_release(record: BrowseRecord) -> Release:
 
     This bridges the direct source's browse data to the generic release model.
     """
+    info_url = record.source_url
+    if not info_url:
+        aa_base = network.get_aa_base_url() if config.get("ENABLE_ANNAS_ARCHIVE", True) else None
+        info_url = f"{aa_base}/md5/{record.id}" if aa_base else None
+
     return Release(
         source=record.source,
         source_id=record.id,
@@ -2077,7 +2140,7 @@ def _browse_record_to_release(record: BrowseRecord) -> Release:
         language=record.language,  # Top-level language for filtering
         size=record.size,
         download_url=record.download_urls[0] if record.download_urls else None,
-        info_url=f"{network.get_aa_base_url()}/md5/{record.id}",
+        info_url=info_url,
         protocol=ReleaseProtocol.HTTP,
         indexer="Direct Download",
         content_type=record.content,  # Preserve content type from source
@@ -2089,6 +2152,7 @@ def _browse_record_to_release(record: BrowseRecord) -> Release:
             "preview": record.preview,
             "description": record.description,
             "download_urls": record.download_urls,
+            "source_url": record.source_url,
             "info": record.info,
         },
     )
@@ -2395,6 +2459,15 @@ class DirectDownloadHandler(DownloadHandler):
             # Create browse record from task data - NO AA page fetch here
             # AA page is fetched lazily by _fetch_aa_page_urls only when
             # we actually reach an AA slow source in the priority order
+            download_urls = []
+            if task.source_url:
+                download_urls.append(task.source_url)
+            extra = getattr(task, "extra", {}) or {}
+            if isinstance(extra, dict):
+                for du in extra.get("download_urls", []):
+                    if du not in download_urls:
+                        download_urls.append(du)
+
             book_info = BrowseRecord(
                 id=task.task_id,
                 title=task.title,
@@ -2404,6 +2477,8 @@ class DirectDownloadHandler(DownloadHandler):
                 format=task.format,
                 size=task.size,
                 preview=task.preview,
+                download_urls=download_urls,
+                source_url=task.source_url,
             )
 
             return self._execute_download(
