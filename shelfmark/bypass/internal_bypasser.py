@@ -1100,6 +1100,59 @@ async def _get(url: str, driver: Any, cancel_flag: Event | None = None) -> str:
     return ""
 
 
+_SHARED_CDP_DRIVER: Any = None
+
+
+def _should_reuse_driver() -> bool:
+    return os.environ.get(_BYPASS_CHILD_ENV) == "1"
+
+
+def _is_driver_alive(driver: Any) -> bool:
+    if driver is None:
+        return False
+    try:
+        if hasattr(driver, "is_running") and not driver.is_running():
+            return False
+        if getattr(driver, "_process", None) is not None and driver._process.returncode is not None:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+async def _discard_shared_driver() -> None:
+    global _SHARED_CDP_DRIVER
+    if _SHARED_CDP_DRIVER is not None:
+        driver = _SHARED_CDP_DRIVER
+        _SHARED_CDP_DRIVER = None
+        await _close_cdp_driver(driver)
+    else:
+        _reset_virtual_display()
+
+
+async def _get_or_create_driver(url: str) -> Any:
+    global _SHARED_CDP_DRIVER
+    if _should_reuse_driver():
+        if _is_driver_alive(_SHARED_CDP_DRIVER):
+            logger.debug("Reusing existing CDP browser instance")
+            return _SHARED_CDP_DRIVER
+        if _SHARED_CDP_DRIVER is not None:
+            await _discard_shared_driver()
+        _SHARED_CDP_DRIVER = await _create_cdp_browser(url)
+        return _SHARED_CDP_DRIVER
+    return await _create_cdp_browser(url)
+
+
+def _close_shared_driver_sync() -> None:
+    global _SHARED_CDP_DRIVER
+    if _SHARED_CDP_DRIVER is not None:
+        try:
+            _CDP_WORKER.run(_discard_shared_driver(), timeout=10.0)
+        except Exception as exc:
+            logger.debug("Error while closing shared CDP driver: %s", exc)
+        _SHARED_CDP_DRIVER = None
+
+
 def _run_bypass_in_current_process(url: str, retry: int, cancel_flag: Event | None = None) -> str:
     """Run the CDP bypass in the current process."""
     timeout = (
@@ -1110,6 +1163,7 @@ def _run_bypass_in_current_process(url: str, retry: int, cancel_flag: Event | No
 
     async def _run_bypass() -> str:
         driver = None
+        reuse = _should_reuse_driver()
         # Stop retrying while there is still time to say so. A challenge nothing can solve
         # would otherwise spend every one of `retry` passes and be cut off mid-pass by the
         # worker deadline, which surfaces to the caller as `RuntimeError: TimeoutError` -
@@ -1117,7 +1171,7 @@ def _run_bypass_in_current_process(url: str, retry: int, cancel_flag: Event | No
         # reverse proxy. Giving up a pass early returns the real "bypass failed" instead.
         deadline = time.monotonic() + timeout - _RESERVE_FOR_CLEAN_FAILURE_SECONDS
         try:
-            driver = await _create_cdp_browser(url)
+            driver = await _get_or_create_driver(url)
 
             for attempt in range(retry):
                 _check_cancellation(cancel_flag, "Bypass cancelled before attempt")
@@ -1146,16 +1200,26 @@ def _run_bypass_in_current_process(url: str, retry: int, cancel_flag: Event | No
                     # On CDP errors, quit and create a fresh browser
                     if type(e).__name__ in DRIVER_RESET_ERRORS:
                         logger.info("Restarting Chrome due to browser error...")
-                        await _close_cdp_driver(driver)
-                        driver = await _create_cdp_browser(url)
+                        if reuse:
+                            await _discard_shared_driver()
+                        else:
+                            await _close_cdp_driver(driver)
+                        driver = await _get_or_create_driver(url)
 
             logger.error("Bypass failed for %s", url)
+            if reuse:
+                await _discard_shared_driver()
             return ""
+        except Exception:
+            if reuse:
+                await _discard_shared_driver()
+            raise
         finally:
-            if driver:
-                await _close_cdp_driver(driver)
-            else:
-                _reset_virtual_display()
+            if not reuse:
+                if driver:
+                    await _close_cdp_driver(driver)
+                else:
+                    _reset_virtual_display()
 
     # Bound the wait: this holds the module-wide LOCKED for its whole duration, and neither
     # page.get() nor page.wait() has a timeout of its own. Without a deadline here a single
@@ -1186,99 +1250,142 @@ def _run_browser_download_in_current_process(
 
     async def _run_download() -> Path:
         driver = None
+        reuse = _should_reuse_driver()
         try:
-            driver = await _create_cdp_browser(url)
+            # Step 0: Record baseline files in SELENIUMBASE_DOWNLOADS_DIR before navigation
+            SELENIUMBASE_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            existing_files = {p.name for p in SELENIUMBASE_DOWNLOADS_DIR.iterdir()}
+
+            def _find_completed_file() -> Path | None:
+                current_paths = [
+                    p for p in SELENIUMBASE_DOWNLOADS_DIR.iterdir() if p.name not in existing_files
+                ]
+                in_progress = any(
+                    p.name.endswith(".crdownload") or p.name.endswith(".tmp") for p in current_paths
+                )
+                completed = [
+                    p
+                    for p in current_paths
+                    if not p.name.endswith(".crdownload")
+                    and not p.name.endswith(".tmp")
+                    and p.is_file()
+                    and p.stat().st_size > 0
+                ]
+                if completed and not in_progress:
+                    return completed[0]
+                return None
+
+            driver = await _get_or_create_driver(url)
 
             # Step 1: Ensure Z-Library authentication if applicable
             await _ensure_zlib_auth(driver, url, cancel_flag, status_callback)
 
-            # Step 2: Navigate to book page
+            # Step 2: Navigate to URL
             if status_callback:
-                status_callback("resolving", "Opening book page")
-            page = await driver.get(url)
-            with suppress(Exception):
-                await page.wait()
+                status_callback("resolving", "Opening URL in browser")
+            page = None
+            try:
+                page = await driver.get(url)
+                with suppress(Exception):
+                    await page.wait()
+            except Exception as nav_err:
+                # Direct download triggers net::ERR_ABORTED or download event on Chrome navigation
+                if "ERR_ABORTED" in str(nav_err) or "Download is starting" in str(nav_err):
+                    logger.debug("Navigation aborted due to download starting: %s", nav_err)
+                else:
+                    raise
 
             _check_cancellation(cancel_flag, "Download cancelled after page load")
 
-            # Step 3: Check protection/challenge
-            if not await _is_bypassed(page):
-                logger.info("DiamWall / protection detected on book page, waiting for solve...")
-                if status_callback:
-                    status_callback("resolving", "Solving DiamWall protection")
-                if not await _wait_for_passive_solve(page, cancel_flag):
-                    if not await _bypass(page, cancel_flag=cancel_flag):
-                        msg = f"Could not bypass protection for {url}"
-                        raise RuntimeError(msg)
-
-            await _extract_cookies_from_cdp(driver, page, url)
-
-            # Step 4: Find download link / button
-            if status_callback:
-                status_callback("resolving", "Locating download button")
-            dl_info = None
-            for _ in range(15):
-                _check_cancellation(cancel_flag, "Download cancelled")
-                dl_info = await page.evaluate('''
-                    (() => {
-                        const btn = document.querySelector('a.addDownloadedBook, a[href*="/dl/"]');
-                        return btn ? {href: btn.href, text: btn.innerText} : null;
-                    })()
-                ''')
-                if dl_info and dl_info.get("href"):
-                    break
-                await asyncio.sleep(1)
-
-            if not dl_info or not dl_info.get("href"):
-                error_msg = await page.evaluate('''
-                    (() => {
-                        const el = document.querySelector('.alert, .error, .limits-exceeded, .color-red');
-                        return el ? el.innerText : null;
-                    })()
-                ''')
-                if error_msg:
-                    msg = f"Z-Library download unavailable: {error_msg}"
-                    raise RuntimeError(msg)
-                msg = f"Could not find download button on {url}"
-                raise RuntimeError(msg)
-
-            logger.info("Triggering browser download: %s (%s)", dl_info.get("href"), dl_info.get("text"))
-            if status_callback:
-                status_callback("downloading", f"Downloading via browser ({dl_info.get('text', '')})")
-
-            # Step 5: Record baseline files in SELENIUMBASE_DOWNLOADS_DIR
-            SELENIUMBASE_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-            existing_files = {p.name for p in SELENIUMBASE_DOWNLOADS_DIR.iterdir()}
-
-            # Trigger download
-            await page.evaluate('''
-                (() => {
-                    const btn = document.querySelector('a.addDownloadedBook, a[href*="/dl/"]');
-                    if (btn) btn.click();
-                })()
-            ''')
-
-            # Step 6: Wait for download to complete
             download_deadline = time.monotonic() + 180.0
             downloaded_file = None
-            while time.monotonic() < download_deadline:
-                _check_cancellation(cancel_flag, "Download cancelled while receiving file")
-                current_paths = [p for p in SELENIUMBASE_DOWNLOADS_DIR.iterdir() if p.name not in existing_files]
-                in_progress = any(p.name.endswith(".crdownload") or p.name.endswith(".tmp") for p in current_paths)
-                completed = [
-                    p for p in current_paths
-                    if not p.name.endswith(".crdownload") and not p.name.endswith(".tmp") and p.is_file() and p.stat().st_size > 0
-                ]
-                if completed and not in_progress:
-                    downloaded_file = completed[0]
-                    break
-                await asyncio.sleep(0.5)
+
+            # Step 3: Check if file download already triggered from navigation (e.g. direct /dl/ link)
+            is_direct_dl = "/dl/" in url or any(
+                url.lower().endswith(ext) for ext in (".epub", ".pdf", ".mobi", ".azw3")
+            )
+            if is_direct_dl:
+                logger.info("Direct download link accessed (%s); waiting for browser file receipt...", url)
+                if status_callback:
+                    status_callback("downloading", "Downloading file via browser")
+                while time.monotonic() < download_deadline:
+                    _check_cancellation(cancel_flag, "Download cancelled while receiving file")
+                    downloaded_file = _find_completed_file()
+                    if downloaded_file:
+                        break
+                    await asyncio.sleep(0.5)
+
+            # Step 4: If not a direct link or file not yet downloaded, check page protection & download button
+            if not downloaded_file and page is not None:
+                if not await _is_bypassed(page):
+                    logger.info("DiamWall / protection detected on book page, waiting for solve...")
+                    if status_callback:
+                        status_callback("resolving", "Solving DiamWall protection")
+                    if not await _wait_for_passive_solve(page, cancel_flag):
+                        if not await _bypass(page, cancel_flag=cancel_flag):
+                            msg = f"Could not bypass protection for {url}"
+                            raise RuntimeError(msg)
+
+                await _extract_cookies_from_cdp(driver, page, url)
+
+                # Locate download button on book page
+                if status_callback:
+                    status_callback("resolving", "Locating download button")
+                dl_info = None
+                for _ in range(15):
+                    _check_cancellation(cancel_flag, "Download cancelled")
+                    dl_info = await page.evaluate('''
+                        (() => {
+                            const btn = document.querySelector('a.addDownloadedBook, a[href*="/dl/"]');
+                            return btn ? {href: btn.href, text: btn.innerText} : null;
+                        })()
+                    ''')
+                    if dl_info and dl_info.get("href"):
+                        break
+                    await asyncio.sleep(1)
+
+                if not dl_info or not dl_info.get("href"):
+                    error_msg = await page.evaluate('''
+                        (() => {
+                            const el = document.querySelector('.alert, .error, .limits-exceeded, .color-red');
+                            return el ? el.innerText : null;
+                        })()
+                    ''')
+                    if error_msg:
+                        msg = f"Z-Library download unavailable: {error_msg}"
+                        raise RuntimeError(msg)
+                    msg = f"Could not find download button on {url}"
+                    raise RuntimeError(msg)
+
+                logger.info("Triggering browser download: %s (%s)", dl_info.get("href"), dl_info.get("text"))
+                if status_callback:
+                    status_callback("downloading", f"Downloading via browser ({dl_info.get('text', '')})")
+
+                # Trigger download
+                await page.evaluate('''
+                    (() => {
+                        const btn = document.querySelector('a.addDownloadedBook, a[href*="/dl/"]');
+                        if (btn) btn.click();
+                    })()
+                ''')
+
+                # Wait for download to complete
+                while time.monotonic() < download_deadline:
+                    _check_cancellation(cancel_flag, "Download cancelled while receiving file")
+                    downloaded_file = _find_completed_file()
+                    if downloaded_file:
+                        break
+                    await asyncio.sleep(0.5)
 
             if not downloaded_file or not downloaded_file.exists():
                 msg = f"Browser download timed out or produced no file for {url}"
                 raise TimeoutError(msg)
 
-            logger.info("Browser download complete: %s (%s bytes)", downloaded_file.name, downloaded_file.stat().st_size)
+            logger.info(
+                "Browser download complete: %s (%s bytes)",
+                downloaded_file.name,
+                downloaded_file.stat().st_size,
+            )
 
             destination_dir.mkdir(parents=True, exist_ok=True)
             target = destination_dir / downloaded_file.name
@@ -1286,11 +1393,16 @@ def _run_browser_download_in_current_process(
                 target.unlink()
             shutil.move(str(downloaded_file), str(target))
             return target
+        except Exception:
+            if reuse:
+                await _discard_shared_driver()
+            raise
         finally:
-            if driver:
-                await _close_cdp_driver(driver)
-            else:
-                _reset_virtual_display()
+            if not reuse:
+                if driver:
+                    await _close_cdp_driver(driver)
+                else:
+                    _reset_virtual_display()
 
     return _CDP_WORKER.run(_run_download(), timeout=timeout)
 
@@ -1679,64 +1791,9 @@ def _get_proxy_string(url: str) -> str | None:
     return proxy_url or None
 
 
-def _patch_cdp_browser_start() -> None:
-    """Increase connection retry attempts for slow cold-starts on ARM/Docker."""
-    try:
-        from seleniumbase.undetected.cdp_driver import browser as cdp_browser
-        import mycdp as cdp
-
-        if getattr(cdp_browser.Browser, "_shelfmark_patched", False):
-            return
-
-        orig_start = cdp_browser.Browser.start
-
-        async def _patched_start(self: Any) -> None:
-            try:
-                return await orig_start(self)
-            except Exception as e:
-                if "Failed to connect to the browser" in str(e) and hasattr(self, "_http"):
-                    logger.info("Browser slow to start; continuing to wait for debug port...")
-                    for _ in range(80):
-                        await asyncio.sleep(0.25)
-                        try:
-                            self.info = cdp_browser.ContraDict(
-                                await self._http.get("version"), silent=True
-                            )
-                            if self.info:
-                                break
-                        except Exception:
-                            pass
-                    if self.info:
-                        logger.info("Browser debug port connected successfully after extra wait")
-                        await asyncio.sleep(0.03)
-                        self.connection = cdp_browser.Connection(
-                            self.info.webSocketDebuggerUrl, browser=self
-                        )
-                        await asyncio.sleep(0.03)
-                        if self.config.autodiscover_targets:
-                            self.connection.handlers[cdp.target.TargetInfoChanged] = [
-                                self._handle_target_update
-                            ]
-                            self.connection.handlers[cdp.target.TargetCreated] = [
-                                self._handle_target_update
-                            ]
-                            self.connection.handlers[cdp.target.TargetDestroyed] = [
-                                self._handle_target_update
-                            ]
-                        return
-                raise
-
-        cdp_browser.Browser.start = _patched_start
-        cdp_browser.Browser._shelfmark_patched = True
-        logger.debug("Patched cdp_driver.Browser.start for extended startup timeout")
-    except Exception as exc:
-        logger.debug("Could not patch cdp_driver.Browser.start: %s", exc)
-
-
 async def _create_cdp_browser(url: str) -> Any:
     """Create a fresh CDP browser instance."""
     _reset_virtual_display()
-    _patch_cdp_browser_start()
     _patch_seleniumbase_runtime_dirs()
     browser_args = _get_browser_args()
     screen_width, screen_height = get_screen_size()
@@ -2271,16 +2328,18 @@ def _run_child_process() -> int:
     """CLI entrypoint used by the Docker helper subprocess.
 
     Serves one request per line of stdin until the parent closes the pipe, so a burst of
-    protected requests - a single search is several - pays the interpreter start and imports
-    once instead of per request. Each bypass still gets its own browser, closed before the
-    answer is published.
+    protected requests pays the interpreter start and imports once instead of per request.
+    The browser instance is kept open across requests and closed upon exit or idle reap.
     """
     exit_code = 0
-    for line in sys.stdin:
-        request_line = line.strip()
-        if not request_line:
-            continue
-        exit_code = _handle_child_request(request_line)
+    try:
+        for line in sys.stdin:
+            request_line = line.strip()
+            if not request_line:
+                continue
+            exit_code = _handle_child_request(request_line)
+    finally:
+        _close_shared_driver_sync()
     return exit_code
 
 
